@@ -1,0 +1,80 @@
+# Render Blueprint for the central pipeline (Milestone 1: web + cron + Postgres).
+# The Milestone 2 validation worker is added here later as a `type: worker` service.
+databases:
+  - name: techies-pipeline-db
+    databaseName: techies_pipeline
+    user: techies
+    plan: basic-256mb # smallest paid tier; use `free` for evaluation
+
+services:
+  # --- Web: ingestion API + public read API ---
+  - type: web
+    name: techies-data-pipeline
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    preDeployCommand: npm run migrate # apply DB migrations before new code goes live
+    startCommand: npm run start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: techies-pipeline-db
+          property: connectionString
+      - key: PIPELINE_API_TOKEN
+        generateValue: true # bearer token for /internal/ingest/* — copy into both Flask backends
+      - key: PUBLIC_API_KEY
+        generateValue: true # x-api-key for /api/* — copy into both frontend Vercel projects
+      - key: ALLOWED_ORIGINS
+        sync: false # comma-separated frontend origins (for any direct browser calls)
+      - key: PIPELINE_CUTOVER_AT
+        sync: false # ISO timestamp; leads collected at/after this auto-queue for validation
+
+  # --- Worker: validation queue processor (Milestone 2) ---
+  - type: worker
+    name: techies-pipeline-worker
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm run worker
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: techies-pipeline-db
+          property: connectionString
+      - key: TECHIES_VALIDATOR_URL
+        sync: false # base URL of the existing techies-validator-backend
+      # The validator keeps its own OPENAI_API_KEY / APIFY_API_TOKEN / FACEBOOK_COOKIES.
+
+  # --- Cron: scheduled reconciliation pull every 15 minutes (doc section 2) ---
+  - type: cron
+    name: techies-pipeline-reconcile
+    runtime: node
+    schedule: "*/15 * * * *"
+    buildCommand: npm install
+    startCommand: npm run reconcile
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: techies-pipeline-db
+          property: connectionString
+      - key: PIPELINE_BASE_URL
+        fromService:
+          type: web
+          name: techies-data-pipeline
+          property: hostport
+      - key: PIPELINE_API_TOKEN
+        fromService:
+          type: web
+          name: techies-data-pipeline
+          envVarKey: PIPELINE_API_TOKEN
+      - key: NFULL_CSV_URL
+        sync: false
+      - key: NFULL_API_KEY
+        sync: false
+      - key: MFULL_CSV_URL
+        sync: false
+      - key: MFULL_API_KEY
+        sync: false

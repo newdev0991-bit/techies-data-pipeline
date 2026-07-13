@@ -1,0 +1,31 @@
+{
+  "name": "techies-data-pipeline",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Central ingestion + dedup pipeline making myDatabase the single source of truth for NFULL and MFULL leads.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "migrate": "node src/db/migrate.js",
+    "reconcile": "node src/reconcile.js",
+    "worker": "node src/worker.js",
+    "bulk-revalidate": "node src/cli/bulk-revalidate.js",
+    "shadow-compare": "node src/shadow-compare.mjs",
+    "check:contract": "node scripts/check-contract.mjs",
+    "check:reconcile": "node scripts/check-reconcile.mjs",
+    "check:proxy": "node scripts/check-proxy.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "smoke:validation": "node scripts/smoke-validation.mjs",
+    "mock:validator": "node scripts/mock-validator.mjs"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "pg": "^8.12.0"
+  }
+}
