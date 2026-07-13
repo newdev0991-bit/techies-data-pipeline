@@ -28,9 +28,13 @@ export function parseCsv(text) {
 
 export function csvToObjects(text) {
   const rows = parseCsv(text);
-  if (rows.length < 2) return [];
-  const headers = rows[0];
-  return rows.slice(1)
+  // Skip leading all-empty rows (raw sheet exports often have a blank first row
+  // before the real header row).
+  let start = 0;
+  while (start < rows.length && rows[start].every((v) => !v || v.trim() === '')) start += 1;
+  if (rows.length - start < 2) return [];
+  const headers = rows[start];
+  return rows.slice(start + 1)
     .filter((r) => r.some((v) => v && v.trim() !== ''))
     .map((r) => Object.fromEntries(headers.map((h, i) => [h, r[i] ?? ''])));
 }

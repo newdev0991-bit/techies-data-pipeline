@@ -13,6 +13,7 @@ import { runDeterministicChecks, RULES_VERSION } from './lib/rules.js';
 import { mapValidatorToDecision } from './lib/decision.js';
 import { fetchEvidence, analyzeLead } from './lib/validatorClient.js';
 import { mergePayloads } from './lib/leadRow.js';
+import { toLeadRow } from './lib/canonical.js';
 
 const WORKER_ID = `${os.hostname?.() || 'worker'}-${randomUUID().slice(0, 8)}`;
 const POLL_MS = Number(process.env.WORKER_POLL_MS || 3000);
@@ -128,7 +129,9 @@ async function processJob(job) {
 
   const payloads = (await pool.query('SELECT raw_payload FROM raw_leads WHERE master_lead_id = $1', [master.id]))
     .rows.map((r) => r.raw_payload);
-  const leadRow = mergePayloads(payloads);
+  // Normalize to the verbose header vocabulary the validator expects, regardless
+  // of whether the lead came from NFULL's or MFULL's differently-named schema.
+  const leadRow = toLeadRow(master, mergePayloads(payloads));
 
   // Layer B — evidence (reuse existing to avoid repeat Apify calls).
   let evidence = await getEvidence(master.id);

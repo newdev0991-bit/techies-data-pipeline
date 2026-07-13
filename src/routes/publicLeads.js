@@ -5,7 +5,8 @@
 import express from 'express';
 import { requireApiKey } from '../lib/auth.js';
 import { pool } from '../db/pool.js';
-import { EXPECTED_HEADERS } from '../lib/canonical.js';
+import { EXPECTED_HEADERS, toLeadRow } from '../lib/canonical.js';
+import { mergePayloads } from '../lib/leadRow.js';
 
 export const publicRouter = express.Router();
 
@@ -15,15 +16,25 @@ publicRouter.use(requireApiKey);
 // column, take the first non-empty value across sources (so a BOTH lead shows
 // MFULL's richer address even if NFULL's payload lacked it).
 function toDisplayRow(row) {
+  // Build display values from the canonical master (schema-agnostic) + merged raw
+  // payloads, so NFULL and MFULL leads both populate the display columns.
+  const leadRow = toLeadRow(
+    {
+      message: row.message,
+      scrape_timestamp: row.scrape_timestamp,
+      business_name: row.business_name,
+      phone: row.phone,
+      postcode: row.postcode,
+      location: row.location,
+      url: row.url,
+      post_timestamp: row.post_timestamp,
+      email: row.email
+    },
+    mergePayloads(row.payloads || [])
+  );
   const merged = {};
-  for (const header of EXPECTED_HEADERS) {
-    let value = '';
-    for (const p of row.payloads || []) {
-      const v = p?.[header];
-      if (v !== undefined && v !== null && String(v).trim() !== '') { value = String(v); break; }
-    }
-    merged[header] = value;
-  }
+  for (const header of EXPECTED_HEADERS) merged[header] = leadRow[header] ?? '';
+
   const uniqueSources = [...new Set(row.sources)].sort();
   merged.source = uniqueSources.length === 2 ? 'BOTH' : uniqueSources[0];
   merged.master_id = row.master_id;
@@ -93,6 +104,8 @@ publicRouter.get('/leads', async (req, res) => {
              m.created_at,
              m.status,
              m.possible_duplicate_of,
+             m.message, m.scrape_timestamp, m.business_name, m.phone,
+             m.postcode, m.location, m.url, m.post_timestamp, m.email,
              array_agg(DISTINCT ls.source::text) AS sources,
              (SELECT json_agg(r.raw_payload) FROM raw_leads r WHERE r.master_lead_id = m.id) AS payloads,
              EXISTS (SELECT 1 FROM exports e WHERE e.master_lead_id = m.id) AS exported

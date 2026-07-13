@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { normalizePermalink, extractPostId } from '../src/lib/fburl.js';
 import { normalizeUkPhone } from '../src/lib/phone.js';
 import { businessKey, fingerprint } from '../src/lib/fingerprint.js';
-import { toCanonical } from '../src/lib/canonical.js';
+import { toCanonical, toLeadRow } from '../src/lib/canonical.js';
 import { A_NFULL, A_MFULL, B_NFULL } from './sample-leads.mjs';
 
 let passed = 0;
@@ -53,5 +53,35 @@ ok('raw_payload retained', a1.raw_payload === A_NFULL);
 const b = toCanonical('NFULL', B_NFULL);
 ok('distinct lead has distinct permalink', b.norm_permalink !== a1.norm_permalink);
 ok('fingerprint present for located lead', fingerprint(a1) !== null);
+
+console.log("canonical: MFULL's REAL schema (different names + trailing spaces)");
+// Mirrors the actual MFullData.csv header row.
+const MFULL_REAL = {
+  'Timestamp': '2026-07-12 08:40',
+  'Primary Contact ': '01234 567890',
+  'Secondary Contact ': '',
+  'Company Name  ': 'ABC Cafe Ltd',
+  'Business Type': 'Hospitality',
+  'Address 1 (Road or Street)  ': '10 High St',
+  'Address 2 (Town or City) ': 'Birkenhead',
+  'Postal Code ': 'CH41 5LH',
+  'Email Address ("." if None)': '.',
+  'Lead Proof URL ': 'https://m.facebook.com/abccafe/posts/1000000000000001',
+  'Number Found URL ': '',
+  'Business Note ': 'Grand opening!',
+  'Column 13': ''
+};
+const mc = toCanonical('MFULL', MFULL_REAL);
+ok('business_name mapped despite trailing spaces', mc.business_name === 'ABC Cafe Ltd');
+ok('phone mapped from "Primary Contact"', mc.norm_phone === '+441234567890');
+ok('postcode mapped from "Postal Code"', mc.postcode === 'CH41 5LH');
+ok('message mapped from "Business Note"', mc.message === 'Grand opening!');
+ok('proof URL mapped from "Lead Proof URL " (trailing space)', !!mc.norm_permalink);
+ok('email "." treated as null', mc.email === null);
+ok('MFULL-real converges with NFULL A on permalink', mc.norm_permalink === a1.norm_permalink);
+const lr = toLeadRow(mc, MFULL_REAL);
+ok('toLeadRow gives validator/display Company Name', lr['Company Name'] === 'ABC Cafe Ltd');
+ok('toLeadRow gives Lead Proof URL', !!lr['Lead Proof URL']);
+ok('toLeadRow maps Address 2 from MFULL town', lr['Address 2 (Village/Town/City)'] === 'Birkenhead');
 
 console.log(`\nPhase 1 contract: ${passed} checks passed ✅`);
