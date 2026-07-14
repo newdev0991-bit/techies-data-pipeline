@@ -18,6 +18,7 @@
     "check:contract": "node scripts/check-contract.mjs",
     "check:reconcile": "node scripts/check-reconcile.mjs",
     "check:proxy": "node scripts/check-proxy.mjs",
+    "check:tick": "node scripts/check-tick.mjs",
     "smoke": "node scripts/smoke.mjs",
     "smoke:validation": "node scripts/smoke-validation.mjs",
     "mock:validator": "node scripts/mock-validator.mjs"
@@ -26,6 +27,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "googleapis": "^173.0.0",
     "pg": "^8.12.0"
   }
 }

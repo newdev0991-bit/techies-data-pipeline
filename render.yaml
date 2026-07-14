@@ -1,80 +1,52 @@
-# Render Blueprint for the central pipeline (Milestone 1: web + cron + Postgres).
-# The Milestone 2 validation worker is added here later as a `type: worker` service.
-databases:
-  - name: techies-pipeline-db
-    databaseName: techies_pipeline
-    user: techies
-    plan: basic-256mb # smallest paid tier; use `free` for evaluation
-
+# Render Blueprint — $0 free-tier deployment.
+# DB is Supabase free Postgres (DATABASE_URL set below). Compute is a single free
+# web service. There is NO always-on worker or Render cron: ingestion + batched
+# validation run via POST /internal/tick, triggered by a free external scheduler
+# (see .github/workflows/pipeline-tick.yml).
+#
+# Migrations: free plan has no preDeployCommand — run `npm run migrate` once from
+# your machine against the Supabase DATABASE_URL (and again after schema changes).
 services:
-  # --- Web: ingestion API + public read API ---
   - type: web
     name: techies-data-pipeline
     runtime: node
-    plan: starter
+    plan: free
     buildCommand: npm install
-    preDeployCommand: npm run migrate # apply DB migrations before new code goes live
     startCommand: npm run start
     healthCheckPath: /health
     autoDeploy: true
     envVars:
       - key: DATABASE_URL
-        fromDatabase:
-          name: techies-pipeline-db
-          property: connectionString
+        sync: false # Supabase pooled connection string (postgres://…:6543/…?pgbouncer=true)
       - key: PIPELINE_API_TOKEN
-        generateValue: true # bearer token for /internal/ingest/* — copy into both Flask backends
+        generateValue: true # bearer for /internal/* — also a GitHub Actions secret
       - key: PUBLIC_API_KEY
         generateValue: true # x-api-key for /api/* — copy into both frontend Vercel projects
       - key: ALLOWED_ORIGINS
-        sync: false # comma-separated frontend origins (for any direct browser calls)
+        sync: false # comma-separated frontend origins
       - key: PIPELINE_CUTOVER_AT
-        sync: false # ISO timestamp; leads collected at/after this auto-queue for validation
-
-  # --- Worker: validation queue processor (Milestone 2) ---
-  - type: worker
-    name: techies-pipeline-worker
-    runtime: node
-    plan: starter
-    buildCommand: npm install
-    startCommand: npm run worker
-    autoDeploy: true
-    envVars:
-      - key: DATABASE_URL
-        fromDatabase:
-          name: techies-pipeline-db
-          property: connectionString
+        sync: false # ISO; leads collected at/after this auto-queue for validation
       - key: TECHIES_VALIDATOR_URL
-        sync: false # base URL of the existing techies-validator-backend
-      # The validator keeps its own OPENAI_API_KEY / APIFY_API_TOKEN / FACEBOOK_COOKIES.
-
-  # --- Cron: scheduled reconciliation pull every 15 minutes (doc section 2) ---
-  - type: cron
-    name: techies-pipeline-reconcile
-    runtime: node
-    schedule: "*/15 * * * *"
-    buildCommand: npm install
-    startCommand: npm run reconcile
-    envVars:
-      - key: DATABASE_URL
-        fromDatabase:
-          name: techies-pipeline-db
-          property: connectionString
-      - key: PIPELINE_BASE_URL
-        fromService:
-          type: web
-          name: techies-data-pipeline
-          property: hostport
-      - key: PIPELINE_API_TOKEN
-        fromService:
-          type: web
-          name: techies-data-pipeline
-          envVarKey: PIPELINE_API_TOKEN
-      - key: NFULL_CSV_URL
+        sync: false # existing techies-validator-backend base URL (validation)
+      - key: VALIDATION_BATCH
+        value: "10" # jobs validated per /internal/tick
+      # --- direct-Google ingestion (per source) ---
+      # PREFERRED: a Service Account JSON (no token expiry); share each sheet with
+      # its client_email. OAuth token JSON also works but expires ~weekly in
+      # "testing" mode. Set one auth per source (SA or OAuth).
+      - key: NFULL_SPREADSHEET_ID
         sync: false
-      - key: NFULL_API_KEY
+      - key: NFULL_SHEET_RANGE
+        sync: false # e.g. Real Time Leads (Dup Checker)!A1:O
+      - key: NFULL_GOOGLE_SA_JSON
         sync: false
-      - key: MFULL_CSV_URL
+      # - key: NFULL_GOOGLE_OAUTH_TOKEN_JSON  (fallback)
+      #   sync: false
+      - key: MFULL_SPREADSHEET_ID
         sync: false
-      - key: MFULL_API_KEY
+      - key: MFULL_SHEET_RANGE
+        sync: false # e.g. ReaL Time Data--!A1:Z
+      - key: MFULL_GOOGLE_SA_JSON
         sync: false
+      # - key: MFULL_GOOGLE_OAUTH_TOKEN_JSON  (fallback)
+      #   sync: false

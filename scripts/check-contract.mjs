@@ -6,6 +6,7 @@ import { normalizePermalink, extractPostId } from '../src/lib/fburl.js';
 import { normalizeUkPhone } from '../src/lib/phone.js';
 import { businessKey, fingerprint } from '../src/lib/fingerprint.js';
 import { toCanonical, toLeadRow } from '../src/lib/canonical.js';
+import { valuesToRows } from '../src/lib/sheets.js';
 import { A_NFULL, A_MFULL, B_NFULL } from './sample-leads.mjs';
 
 let passed = 0;
@@ -83,5 +84,28 @@ const lr = toLeadRow(mc, MFULL_REAL);
 ok('toLeadRow gives validator/display Company Name', lr['Company Name'] === 'ABC Cafe Ltd');
 ok('toLeadRow gives Lead Proof URL', !!lr['Lead Proof URL']);
 ok('toLeadRow maps Address 2 from MFULL town', lr['Address 2 (Village/Town/City)'] === 'Birkenhead');
+
+console.log('sheets.valuesToRows (direct-Google ingestion)');
+// NFULL-style: headers on row 0.
+const nfullValues = [
+  ['Company Name', 'Lead Proof URL', 'Phone Number'],
+  ['ABC Cafe', 'https://facebook.com/x/posts/1', '01234 567890'],
+  ['', '', ''] // trailing blank row ignored
+];
+const nrows = valuesToRows(nfullValues);
+ok('NFULL values -> 1 row object', nrows.length === 1);
+ok('keyed by header', nrows[0]['Company Name'] === 'ABC Cafe');
+// MFULL-style raw export: blank first row, headers on row 1, junk Column 13.
+const mfullValues = [
+  ['', '', '', ''],
+  ['Company Name  ', 'Primary Contact ', 'Lead Proof URL ', 'Column 13'],
+  ['MFULL Biz', '0161 496 0000', 'https://facebook.com/y/posts/2', 'junk']
+];
+const mrows = valuesToRows(mfullValues);
+ok('MFULL raw skips blank first row -> 1 row', mrows.length === 1);
+ok('MFULL row keyed by real header (trailing space)', mrows[0]['Company Name  '] === 'MFULL Biz');
+const mCanon = toCanonical('MFULL', mrows[0]);
+ok('MFULL sheet row maps to canonical (name + url + phone)',
+  mCanon.business_name === 'MFULL Biz' && !!mCanon.norm_permalink && mCanon.norm_phone === '+441614960000');
 
 console.log(`\nPhase 1 contract: ${passed} checks passed ✅`);

@@ -7,6 +7,7 @@ import { pool } from './db/pool.js';
 import { ingestRouter } from './routes/ingest.js';
 import { pipelineRouter } from './routes/pipeline.js';
 import { publicRouter } from './routes/publicLeads.js';
+import { internalRouter } from './routes/internal.js';
 
 const app = express();
 const PORT = process.env.PORT || 4100;
@@ -37,6 +38,7 @@ app.get('/health', async (_req, res) => {
 
 app.use('/internal/ingest', ingestRouter);
 app.use('/internal/pipeline', pipelineRouter);
+app.use('/internal', internalRouter);
 app.use('/api', publicRouter);
 
 app.get('/', (_req, res) => res.json({ service: 'techies-data-pipeline', ok: true }));

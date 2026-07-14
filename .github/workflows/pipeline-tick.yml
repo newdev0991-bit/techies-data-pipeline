@@ -1,0 +1,36 @@
+# Free external scheduler. Replaces the paid always-on worker + Render cron:
+# every ~30 min it wakes the free web service and runs one tick (ingest from
+# Google + validate a bounded batch). Configure repo secrets PIPELINE_BASE_URL
+# and PIPELINE_API_TOKEN (Settings → Secrets and variables → Actions).
+name: pipeline-tick
+
+on:
+  schedule:
+    - cron: "*/30 * * * *" # every 30 minutes (GitHub may delay under load)
+  workflow_dispatch: {} # allow manual runs
+
+concurrency:
+  group: pipeline-tick
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wake service + run tick
+        env:
+          BASE: ${{ secrets.PIPELINE_BASE_URL }}
+          TOKEN: ${{ secrets.PIPELINE_API_TOKEN }}
+        run: |
+          if [ -z "$BASE" ] || [ -z "$TOKEN" ]; then
+            echo "Missing PIPELINE_BASE_URL or PIPELINE_API_TOKEN secret"; exit 1
+          fi
+          # Keep-warm (free web cold-starts after idle); ignore failure.
+          curl -s -m 30 "$BASE/health" || true
+          # Run one tick: ingest all sources + validate a batch.
+          code=$(curl -s -m 180 -o /tmp/tick.json -w "%{http_code}" \
+            -X POST "$BASE/internal/tick" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" -d '{}')
+          echo "tick HTTP $code"; cat /tmp/tick.json || true
+          test "$code" = "200"

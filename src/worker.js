@@ -202,6 +202,18 @@ export async function drainQueue(maxIterations = 1000) {
   return handled;
 }
 
+/** Process up to `maxJobs` claimable jobs (used by the free-tier /internal/tick). */
+export async function processJobs(maxJobs = 10) {
+  let handled = 0;
+  for (let i = 0; i < maxJobs; i++) {
+    // eslint-disable-next-line no-await-in-loop
+    const did = await runOnce();
+    if (!did) break;
+    handled += 1;
+  }
+  return handled;
+}
+
 async function main() {
   if (!validatorUrl()) { console.error('[worker] TECHIES_VALIDATOR_URL not set'); process.exit(1); }
   console.log(`[worker] ${WORKER_ID} polling every ${POLL_MS}ms (validator: ${validatorUrl()})`);
