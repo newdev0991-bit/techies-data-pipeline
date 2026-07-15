@@ -4,3 +4,7 @@ node_modules/
 !.env.example
 *.log
 .DS_Store
+
+# internal working docs — not tracked (project preference)
+CLAUDE.md
+SETUP.md
