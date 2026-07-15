@@ -107,9 +107,16 @@ export function toCanonical(source, row) {
   const county = get(lookup, 'county');
   const location = [town, county].filter(Boolean).join(', ') || null;
 
+  const source_record_id = sourceRecordId(source, row, norm_permalink);
+  // Single canonical identity used for set-based dedup. Prefer the normalized
+  // permalink (present on ~all rows and consistent across sources), then post_id,
+  // then phone, then the synthesized per-source id.
+  const dedup_key = norm_permalink || post_id || norm_phone || `rid:${source_record_id}`;
+
   return {
     source,
-    source_record_id: sourceRecordId(source, row, norm_permalink),
+    source_record_id,
+    dedup_key,
     post_id,
     url,
     owner_name: null,

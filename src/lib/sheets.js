@@ -39,11 +39,17 @@ function authClient({ saJson, tokenJson }) {
   throw new Error('no Google credentials: set a *_GOOGLE_SA_JSON (preferred) or *_GOOGLE_OAUTH_TOKEN_JSON');
 }
 
-/** Convert a raw values matrix (array of arrays) into row objects. */
+/**
+ * Convert a raw values matrix (array of arrays) into row objects. The header row
+ * is the first row with at least 2 non-empty cells — this skips fully-blank rows
+ * AND stray single-cell notes/titles some sheets put above the real headers
+ * (e.g. MFULL's "Pure COT please" note in row 0).
+ */
 export function valuesToRows(values) {
   const rows = values || [];
+  const nonEmptyCount = (r) => (r || []).filter((c) => c !== undefined && c !== null && String(c).trim() !== '').length;
   let start = 0;
-  while (start < rows.length && (rows[start] || []).every((c) => !c || String(c).trim() === '')) start += 1;
+  while (start < rows.length && nonEmptyCount(rows[start]) < 2) start += 1;
   if (rows.length - start < 2) return [];
   const headers = rows[start].map((h) => String(h ?? ''));
   return rows.slice(start + 1)
@@ -59,15 +65,36 @@ export function valuesToRows(values) {
  * Read a source sheet directly from Google and return row objects.
  * @param {object} cfg { tokenJson, spreadsheetId, range }
  */
+// Google A1 notation requires sheet/tab names with spaces or special characters
+// to be wrapped in single quotes (embedded quotes doubled). Quote defensively.
+export function quoteRange(range) {
+  if (!range) return range;
+  const i = range.lastIndexOf('!');
+  if (i <= 0) return range; // no sheet-name part
+  let sheet = range.slice(0, i);
+  const cells = range.slice(i + 1);
+  if (sheet.startsWith("'") && sheet.endsWith("'")) return range; // already quoted
+  sheet = `'${sheet.replace(/'/g, "''")}'`;
+  return `${sheet}!${cells}`;
+}
+
 export async function readSheetRows({ saJson, tokenJson, spreadsheetId, range }) {
   if (!spreadsheetId) throw new Error('missing spreadsheetId');
   const auth = authClient({ saJson, tokenJson });
   const sheets = google.sheets({ version: 'v4', auth });
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: range || 'A:Z'
+    range: quoteRange(range || 'A:Z')
   });
   return valuesToRows(res.data.values || []);
+}
+
+/** List the tab titles of a spreadsheet (for diagnosing range/name issues). */
+export async function listSheetTitles({ saJson, tokenJson, spreadsheetId }) {
+  const auth = authClient({ saJson, tokenJson });
+  const sheets = google.sheets({ version: 'v4', auth });
+  const res = await sheets.spreadsheets.get({ spreadsheetId, fields: 'sheets.properties.title' });
+  return (res.data.sheets || []).map((s) => s.properties.title);
 }
 
 // Per-source config from env. Falls back to a shared GOOGLE_OAUTH_TOKEN_JSON if a
