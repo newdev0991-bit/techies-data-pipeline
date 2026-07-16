@@ -6,7 +6,6 @@ import express from 'express';
 import { requireApiKey } from '../lib/auth.js';
 import { pool } from '../db/pool.js';
 import { EXPECTED_HEADERS, toLeadRow } from '../lib/canonical.js';
-import { mergePayloads } from '../lib/leadRow.js';
 
 export const publicRouter = express.Router();
 
@@ -18,20 +17,19 @@ publicRouter.use(requireApiKey);
 function toDisplayRow(row) {
   // Build display values from the canonical master (schema-agnostic) + merged raw
   // payloads, so NFULL and MFULL leads both populate the display columns.
-  const leadRow = toLeadRow(
-    {
-      message: row.message,
-      scrape_timestamp: row.scrape_timestamp,
-      business_name: row.business_name,
-      phone: row.phone,
-      postcode: row.postcode,
-      location: row.location,
-      url: row.url,
-      post_timestamp: row.post_timestamp,
-      email: row.email
-    },
-    mergePayloads(row.payloads || [])
-  );
+  const leadRow = toLeadRow({
+    message: row.message,
+    scrape_timestamp: row.scrape_timestamp,
+    business_name: row.business_name,
+    phone: row.phone,
+    phone2: row.phone2,
+    postcode: row.postcode,
+    address1: row.address1,
+    location: row.location,
+    url: row.url,
+    post_timestamp: row.post_timestamp,
+    email: row.email
+  }, {});
   const merged = {};
   for (const header of EXPECTED_HEADERS) merged[header] = leadRow[header] ?? '';
 
@@ -84,6 +82,10 @@ publicRouter.get('/leads', async (req, res) => {
     const pageSize = Math.min(Math.max(Number(req.query.pageSize) || 100, 1), 500);
     const offset = (page - 1) * pageSize;
     const format = (req.query.format || 'json').toLowerCase();
+    // CSV returns the FULL matching set (the frontends load it whole, like the old
+    // backend CSV); JSON stays paginated.
+    const limit = format === 'csv' ? 100000 : pageSize;
+    const effOffset = format === 'csv' ? 0 : offset;
 
     const { whereSql, havingSql, params } = buildFilters(req.query);
 
@@ -104,10 +106,9 @@ publicRouter.get('/leads', async (req, res) => {
              m.created_at,
              m.status,
              m.possible_duplicate_of,
-             m.message, m.scrape_timestamp, m.business_name, m.phone,
-             m.postcode, m.location, m.url, m.post_timestamp, m.email,
+             m.message, m.scrape_timestamp, m.business_name, m.phone, m.phone2,
+             m.postcode, m.address1, m.location, m.url, m.post_timestamp, m.email,
              array_agg(DISTINCT ls.source::text) AS sources,
-             (SELECT json_agg(r.raw_payload) FROM raw_leads r WHERE r.master_lead_id = m.id) AS payloads,
              EXISTS (SELECT 1 FROM exports e WHERE e.master_lead_id = m.id) AS exported
         FROM master_leads m
         JOIN lead_sources ls ON ls.master_lead_id = m.id
@@ -115,7 +116,7 @@ publicRouter.get('/leads', async (req, res) => {
        GROUP BY m.id
        ${havingSql}
        ORDER BY m.created_at DESC, m.id DESC
-       LIMIT ${pageSize} OFFSET ${offset}`;
+       LIMIT ${limit} OFFSET ${effOffset}`;
     const dataRes = await pool.query(dataSql, params);
 
     const leads = dataRes.rows.map(toDisplayRow);
@@ -247,8 +248,11 @@ publicRouter.post('/exports', async (req, res) => {
 function toCsv(leads) {
   const headers = [...EXPECTED_HEADERS, 'source'];
   const esc = (v) => {
-    const s = v === null || v === undefined ? '' : String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    // Collapse embedded newlines so every record is ONE physical line — the
+    // frontends' line-based CSV parser breaks on multi-line quoted fields.
+    let s = v === null || v === undefined ? '' : String(v);
+    s = s.replace(/[\r\n]+/g, ' ').trim();
+    return /[",]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const lines = [headers.join(',')];
   for (const lead of leads) {

@@ -20,8 +20,8 @@ function cutoverAt() {
 
 const STG_COLS = [
   'source', 'source_record_id', 'dedup_key', 'post_id', 'url', 'owner_name', 'message',
-  'post_timestamp', 'scrape_timestamp', 'business_name', 'phone', 'email', 'postcode',
-  'location', 'norm_permalink', 'norm_phone', 'fingerprint', 'raw_payload'
+  'post_timestamp', 'scrape_timestamp', 'business_name', 'phone', 'phone2', 'email',
+  'postcode', 'address1', 'location', 'norm_permalink', 'norm_phone', 'fingerprint', 'raw_payload'
 ];
 
 async function ingestChunk(client, runId, canonicals) {
@@ -39,8 +39,10 @@ async function ingestChunk(client, runId, canonicals) {
     c.scrape_timestamp.push(x.scrape_timestamp);
     c.business_name.push(x.business_name);
     c.phone.push(x.phone);
+    c.phone2.push(x.phone2);
     c.email.push(x.email);
     c.postcode.push(x.postcode);
+    c.address1.push(x.address1);
     c.location.push(x.location);
     c.norm_permalink.push(x.norm_permalink);
     c.norm_phone.push(x.norm_phone);
@@ -52,9 +54,9 @@ async function ingestChunk(client, runId, canonicals) {
     CREATE TEMP TABLE stg (
       source lead_source_name, source_record_id text, dedup_key text, post_id text,
       url text, owner_name text, message text, post_timestamp timestamptz,
-      scrape_timestamp timestamptz, business_name text, phone text, email text,
-      postcode text, location text, norm_permalink text, norm_phone text,
-      fingerprint text, raw_payload jsonb
+      scrape_timestamp timestamptz, business_name text, phone text, phone2 text,
+      email text, postcode text, address1 text, location text, norm_permalink text,
+      norm_phone text, fingerprint text, raw_payload jsonb
     ) ON COMMIT DROP`);
 
   await client.query(
@@ -62,7 +64,7 @@ async function ingestChunk(client, runId, canonicals) {
        $1::lead_source_name[], $2::text[], $3::text[], $4::text[], $5::text[],
        $6::text[], $7::text[], $8::timestamptz[], $9::timestamptz[], $10::text[],
        $11::text[], $12::text[], $13::text[], $14::text[], $15::text[], $16::text[],
-       $17::text[], $18::jsonb[])`,
+       $17::text[], $18::text[], $19::text[], $20::jsonb[])`,
     STG_COLS.map((k) => c[k])
   );
 
@@ -82,10 +84,10 @@ async function ingestChunk(client, runId, canonicals) {
   const masterRes = await client.query(
     `INSERT INTO master_leads
        (dedup_key, post_id, url, owner_name, message, post_timestamp, scrape_timestamp,
-        business_name, phone, email, postcode, location, norm_permalink, norm_phone, fingerprint, status)
+        business_name, phone, phone2, email, postcode, address1, location, norm_permalink, norm_phone, fingerprint, status)
      SELECT DISTINCT ON (dedup_key)
         dedup_key, post_id, url, owner_name, message, post_timestamp, scrape_timestamp,
-        business_name, phone, email, postcode, location, norm_permalink, norm_phone, fingerprint, 'INGESTED'
+        business_name, phone, phone2, email, postcode, address1, location, norm_permalink, norm_phone, fingerprint, 'INGESTED'
        FROM stg ORDER BY dedup_key
      ON CONFLICT (dedup_key) DO NOTHING
      RETURNING id`
