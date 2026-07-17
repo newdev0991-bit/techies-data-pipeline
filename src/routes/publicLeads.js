@@ -43,7 +43,7 @@ function toDisplayRow(row) {
 }
 
 function buildFilters(query) {
-  const where = ['1=1'];
+  const where = ['m.hidden_from_combined = false'];
   const having = [];
   const params = [];
 
@@ -145,41 +145,57 @@ publicRouter.get('/leads', async (req, res) => {
 publicRouter.get('/stats', async (_req, res) => {
   try {
     const { rows } = await pool.query(`
+      WITH visible AS (
+        SELECT * FROM master_leads WHERE hidden_from_combined = false
+      ), visible_sources AS (
+        SELECT ls.*
+          FROM lead_sources ls
+          JOIN visible m ON m.id = ls.master_lead_id
+      ), visible_occurrences AS (
+        SELECT r.*
+          FROM raw_leads r
+          JOIN visible m ON m.id = r.master_lead_id
+      )
       SELECT
-        (SELECT count(*) FROM master_leads) AS combined_unique,
-        (SELECT count(*) FROM raw_leads) AS total_occurrences,
-        (SELECT count(*) FROM raw_leads) - (SELECT count(*) FROM master_leads) AS duplicates_removed,
-        (SELECT count(*) FROM master_leads WHERE possible_duplicate_of IS NOT NULL) AS flagged_possible_duplicates,
-        (SELECT count(*) FROM lead_sources WHERE source = 'NFULL') AS nfull_total,
-        (SELECT count(*) FROM lead_sources WHERE source = 'MFULL') AS mfull_total,
-        (SELECT count(*) FROM lead_sources WHERE source = 'NFULL' AND first_seen::date = current_date) AS nfull_today,
-        (SELECT count(*) FROM lead_sources WHERE source = 'MFULL' AND first_seen::date = current_date) AS mfull_today,
+        (SELECT count(*) FROM visible) AS combined_unique,
+        (SELECT count(*) FROM visible_occurrences) AS total_occurrences,
+        (SELECT count(*) FROM visible_occurrences) - (SELECT count(*) FROM visible) AS duplicates_removed,
+        (SELECT count(*) FROM visible WHERE possible_duplicate_of IS NOT NULL) AS flagged_possible_duplicates,
+        (SELECT count(*) FROM visible_sources WHERE source = 'NFULL') AS nfull_total,
+        (SELECT count(*) FROM visible_sources WHERE source = 'MFULL') AS mfull_total,
+        (SELECT count(*) FROM visible_sources WHERE source = 'NFULL' AND first_seen::date = current_date) AS nfull_today,
+        (SELECT count(*) FROM visible_sources WHERE source = 'MFULL' AND first_seen::date = current_date) AS mfull_today,
         (SELECT count(*) FROM (
-            SELECT master_lead_id FROM lead_sources GROUP BY master_lead_id HAVING count(DISTINCT source) = 2
+            SELECT master_lead_id FROM visible_sources GROUP BY master_lead_id HAVING count(DISTINCT source) = 2
         ) b) AS found_by_both,
         (SELECT count(*) FROM (
-            SELECT master_lead_id FROM lead_sources GROUP BY master_lead_id
+            SELECT master_lead_id FROM visible_sources GROUP BY master_lead_id
             HAVING count(DISTINCT source) = 1 AND max(source::text) = 'NFULL'
         ) n) AS nfull_only,
         (SELECT count(*) FROM (
-            SELECT master_lead_id FROM lead_sources GROUP BY master_lead_id
+            SELECT master_lead_id FROM visible_sources GROUP BY master_lead_id
             HAVING count(DISTINCT source) = 1 AND max(source::text) = 'MFULL'
         ) mo) AS mfull_only
     `);
     const s = rows[0];
 
     const vres = await pool.query(`
+      WITH visible AS (
+        SELECT * FROM master_leads WHERE hidden_from_combined = false
+      )
       SELECT
-        (SELECT count(*) FROM master_leads WHERE status = 'APPROVED') AS approved,
-        (SELECT count(*) FROM master_leads WHERE status = 'REVIEW_REQUIRED') AS review_required,
-        (SELECT count(*) FROM master_leads WHERE status = 'REJECTED') AS rejected,
-        (SELECT count(*) FROM master_leads WHERE status IN ('INGESTED','READY_FOR_VALIDATION','VALIDATING')) AS pending,
-        (SELECT count(*) FROM validation_jobs WHERE status = 'FAILED') AS validation_failures,
-        (SELECT count(*) FROM validation_results WHERE layer = 'deterministic') AS rejected_before_ai,
-        (SELECT count(*) FROM validation_results WHERE layer = 'ai') AS ai_calls,
-        (SELECT coalesce(sum(ai_cost_usd), 0) FROM validation_results) AS total_ai_cost_usd,
+        (SELECT count(*) FROM visible WHERE status = 'APPROVED') AS approved,
+        (SELECT count(*) FROM visible WHERE status = 'REVIEW_REQUIRED') AS review_required,
+        (SELECT count(*) FROM visible WHERE status = 'REJECTED') AS rejected,
+        (SELECT count(*) FROM visible WHERE status IN ('INGESTED','READY_FOR_VALIDATION','VALIDATING')) AS pending,
+        (SELECT count(*) FROM validation_jobs vj JOIN visible m ON m.id = vj.master_lead_id WHERE vj.status = 'FAILED') AS validation_failures,
+        (SELECT count(*) FROM validation_results vr JOIN visible m ON m.id = vr.master_lead_id WHERE vr.layer = 'deterministic') AS rejected_before_ai,
+        (SELECT count(*) FROM validation_results vr JOIN visible m ON m.id = vr.master_lead_id WHERE vr.layer = 'ai') AS ai_calls,
+        (SELECT coalesce(sum(vr.ai_cost_usd), 0) FROM validation_results vr JOIN visible m ON m.id = vr.master_lead_id) AS total_ai_cost_usd,
         (SELECT round(avg(extract(epoch FROM (vr.validated_at - vj.created_at))))
-           FROM validation_results vr JOIN validation_jobs vj ON vj.id = vr.job_id) AS avg_validation_seconds
+           FROM validation_results vr
+           JOIN validation_jobs vj ON vj.id = vr.job_id
+           JOIN visible m ON m.id = vr.master_lead_id) AS avg_validation_seconds
     `);
     const v = vres.rows[0];
     const approved = Number(v.approved);

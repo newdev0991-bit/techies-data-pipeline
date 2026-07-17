@@ -1,0 +1,54 @@
+# MFULL deletes its source rows after 24 hours. Capture it independently from
+# the larger NFULL/validation tick, retry failures, and fail loudly unless the
+# API confirms that MFULL ingestion actually ran.
+name: mfull-capture
+
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *" # every 15 minutes, offset from pipeline-tick
+  workflow_dispatch: {}
+
+concurrency:
+  group: pipeline-ingestion
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Capture ephemeral MFULL rows
+        env:
+          BASE: ${{ secrets.PIPELINE_BASE_URL }}
+          TOKEN: ${{ secrets.PIPELINE_API_TOKEN }}
+        run: |
+          if [ -z "$BASE" ] || [ -z "$TOKEN" ]; then
+            echo "Missing PIPELINE_BASE_URL or PIPELINE_API_TOKEN secret"; exit 1
+          fi
+          BASE="${BASE%/}"
+          curl -s -m 30 "$BASE/health" || true
+
+          for attempt in 1 2 3; do
+            set +e
+            code=$(curl -s -m 180 -o /tmp/mfull-tick.json -w "%{http_code}" \
+              -X POST "$BASE/internal/tick" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: application/json" \
+              -d '{"sources":["MFULL"],"validate":0}')
+            curl_status=$?
+            set -e
+
+            echo "MFULL capture attempt $attempt: curl=$curl_status HTTP=$code"
+            cat /tmp/mfull-tick.json 2>/dev/null || true
+            if [ "$curl_status" = "0" ] && [ "$code" = "200" ] && \
+               jq -e '.ok == true and ([.ingest[]? | select(.source == "MFULL" and .errors == 0)] | length == 1)' \
+                 /tmp/mfull-tick.json >/dev/null; then
+              echo "MFULL capture confirmed"
+              exit 0
+            fi
+
+            if [ "$attempt" -lt 3 ]; then sleep $((attempt * 20)); fi
+          done
+
+          echo "MFULL capture failed after 3 attempts"
+          exit 1

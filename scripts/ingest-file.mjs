@@ -5,6 +5,7 @@
 import 'dotenv/config';
 import { readFile } from 'node:fs/promises';
 import { csvToObjects } from '../src/lib/csv.js';
+import { tagSourceOccurrences } from '../src/lib/canonical.js';
 
 const source = (process.argv[2] || '').toUpperCase();
 const path = process.argv[3];
@@ -20,7 +21,7 @@ if (!['NFULL', 'MFULL'].includes(source) || !path) {
 async function main() {
   if (!TOKEN) { console.error('PIPELINE_API_TOKEN not set'); process.exit(1); }
   const text = await readFile(path, 'utf8');
-  const rows = csvToObjects(text);
+  const rows = tagSourceOccurrences(source, csvToObjects(text));
   console.log(`[ingest-file] ${source}: ${rows.length} rows from ${path} -> ${base}`);
 
   let received = 0; let inserted = 0; let duplicates = 0; let errors = 0;

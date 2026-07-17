@@ -15,6 +15,14 @@ internalRouter.use(requireBearer);
 
 internalRouter.post('/tick', async (req, res) => {
   const doIngest = req.body?.ingest !== false; // default true
+  const requestedSources = req.body?.sources;
+  if (requestedSources !== undefined && (
+    !Array.isArray(requestedSources) ||
+    requestedSources.length === 0 ||
+    requestedSources.some((source) => source !== 'NFULL' && source !== 'MFULL')
+  )) {
+    return res.status(400).json({ error: '`sources` must be a non-empty array containing only NFULL and/or MFULL.' });
+  }
   const validateN = req.body?.validate != null
     ? Number(req.body.validate)
     : Number(process.env.VALIDATION_BATCH || 10);
@@ -22,7 +30,18 @@ internalRouter.post('/tick', async (req, res) => {
   const result = { ingest: [], validated: 0, errors: [] };
 
   if (doIngest) {
-    for (const cfg of sourceConfigs()) {
+    const configured = sourceConfigs();
+    const wanted = requestedSources ? new Set(requestedSources) : null;
+    const selected = wanted ? configured.filter((cfg) => wanted.has(cfg.name)) : configured;
+
+    if (wanted) {
+      const configuredNames = new Set(configured.map((cfg) => cfg.name));
+      for (const source of wanted) {
+        if (!configuredNames.has(source)) result.errors.push(`${source}: source is not configured`);
+      }
+    }
+
+    for (const cfg of selected) {
       try {
         const rows = await readSheetRows(cfg);
         const items = rows.map((row) => ({ source: cfg.name, row }));
@@ -35,6 +54,7 @@ internalRouter.post('/tick', async (req, res) => {
           jobs_created: r.detail?.validation_jobs_created ?? 0,
           errors: r.errors
         });
+        if (r.errors > 0) result.errors.push(`${cfg.name}: ${r.errors} rows failed ingestion`);
       } catch (err) {
         // One source failing must not stop the others or validation.
         result.errors.push(`${cfg.name}: ${err.message}`);

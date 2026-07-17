@@ -15,8 +15,9 @@ async function main() {
   const { rows } = await pool.query(
     `WITH candidates AS (
        SELECT m.id
-         FROM master_leads m
+        FROM master_leads m
         WHERE m.status = 'INGESTED'
+          AND m.hidden_from_combined = false
           AND NOT EXISTS (
             SELECT 1 FROM validation_jobs vj
              WHERE vj.master_lead_id = m.id AND vj.status IN ('PENDING','PROCESSING','RETRY')

@@ -1,7 +1,7 @@
 // SYNTHETIC test fixtures only — never real lead data.
 // Rows are keyed by the exact verbose Google-Sheet headers each source emits.
-// Lead A is deliberately found by BOTH sources (same Facebook post, different
-// host + tracking params + business-name/phone formatting) to exercise dedup.
+// Lead A is deliberately found by BOTH sources with the same normalized phone
+// to exercise NFULL-first cross-source matching.
 
 // ---- Lead A: found by BOTH NFULL and MFULL (same post 1000000000000001) ----
 export const A_NFULL = {
@@ -48,6 +48,19 @@ export const B_NFULL = {
   'Lead Proof URL': 'https://www.facebook.com/permalink.php?story_fbid=2000000000000002&id=555'
 };
 
+// A second, genuinely different NFULL row that happens to use B's phone. NFULL
+// is authoritative, so phone equality must not collapse these two rows.
+export const B2_NFULL = {
+  ...B_NFULL,
+  'Lead Statement': 'A separate business is opening on River Road.',
+  'Timestamp': '2026-07-12 10:30:00',
+  'Company Name': 'River Road Retail',
+  'Address 1 (Road/Street/Lane/Park/Industrial Estate)': '12 River Road',
+  'Address 2 (Village/Town/City)': 'Wirral',
+  'Post Code (Please Put The Full Postcode, Example: CH41 5LH)': 'CH42 1AA',
+  'Lead Proof URL': 'https://www.facebook.com/riverroad/posts/2111111111111111'
+};
+
 // ---- Lead C: MFULL only ----
 export const C_MFULL = {
   'Timestamp': '2026-07-12 11:00:00',
@@ -64,6 +77,15 @@ export const C_MFULL = {
   'Lead Posting Date': '2026-07-12 10:45:00',
   'Lead Statement': 'Under new management! The bistro has been taken over.',
   'Lead Generation Specialist': 'agent-synthetic'
+};
+
+// Same normalized phone as C but different row/URL. Only one MFULL copy should
+// enter the combined system.
+export const C_MFULL_DUP = {
+  ...C_MFULL,
+  'Timestamp': '2026-07-12 11:05:00',
+  'Company Name': 'Corner Bistro duplicate row',
+  'Lead Proof URL': 'https://www.facebook.com/cornerbistro/posts/3111111111111111'
 };
 
 // ---- Lead D: NFULL, secondary (fuzzy) match to nothing exact but flaggable ----
@@ -99,5 +121,5 @@ export const D_MFULL = {
 };
 
 // Convenience batches for the smoke test.
-export const NFULL_BATCH = [A_NFULL, B_NFULL, D_NFULL];
-export const MFULL_BATCH = [A_MFULL, C_MFULL, D_MFULL];
+export const NFULL_BATCH = [A_NFULL, B_NFULL, B2_NFULL, D_NFULL];
+export const MFULL_BATCH = [A_MFULL, C_MFULL, C_MFULL_DUP, D_MFULL];
