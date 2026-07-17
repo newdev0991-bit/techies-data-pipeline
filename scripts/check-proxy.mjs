@@ -48,11 +48,11 @@ async function run() {
 
   try {
     console.log('NFULL proxy: CSV passthrough');
-    const csv = await callProxy(nfullProxy, '/api/leads?format=csv&source=BOTH');
+    const csv = await callProxy(nfullProxy, '/api/leads?format=csv&source=ALL');
     ok('status 200', csv._status === 200);
     ok('content-type is text/csv', /text\/csv/.test(csv._headers['Content-Type'] || ''));
     ok('CSV header present', csv._body.split('\n')[0].includes('Company Name'));
-    ok('BOTH lead (ABC) present in CSV', csv._body.includes('ABC'));
+    ok('lead (ABC) present in CSV', csv._body.includes('ABC'));
 
     console.log('NFULL proxy: JSON + source filter forwarded');
     const json = await callProxy(nfullProxy, '/api/leads?source=NFULL');

@@ -7,7 +7,9 @@ import { normalizeUkPhone } from '../src/lib/phone.js';
 import { businessKey, fingerprint } from '../src/lib/fingerprint.js';
 import { toCanonical, toLeadRow } from '../src/lib/canonical.js';
 import { valuesToRows } from '../src/lib/sheets.js';
-import { A_NFULL, A_MFULL, B_NFULL } from './sample-leads.mjs';
+import { matchKey } from '../src/lib/matchKey.js';
+import { mergeAsymmetric } from '../src/lib/mergeAsymmetric.js';
+import { A_NFULL, A_MFULL, B_NFULL, C_MFULL, D_NFULL, D_MFULL } from './sample-leads.mjs';
 
 let passed = 0;
 function ok(name, cond) {
@@ -107,5 +109,40 @@ ok('MFULL row keyed by real header (trailing space)', mrows[0]['Company Name  ']
 const mCanon = toCanonical('MFULL', mrows[0]);
 ok('MFULL sheet row maps to canonical (name + url + phone)',
   mCanon.business_name === 'MFULL Biz' && !!mCanon.norm_permalink && mCanon.norm_phone === '+441614960000');
+
+console.log('matchKey + mergeAsymmetric (NFULL-base asymmetric dedup)');
+const cA_N = toCanonical('NFULL', A_NFULL);
+const cA_M = toCanonical('MFULL', A_MFULL);
+const cB_N = toCanonical('NFULL', B_NFULL);
+const cC_M = toCanonical('MFULL', C_MFULL);
+const cD_N = toCanonical('NFULL', D_NFULL);
+const cD_M = toCanonical('MFULL', D_MFULL);
+
+ok('matchKey: same phone across sources yields equal key',
+  !!matchKey(cA_N) && matchKey(cA_N) === matchKey(cA_M));
+ok('matchKey: null when no phone',
+  matchKey(toCanonical('NFULL', { 'Company Name': 'No Keys Ltd' })) === null);
+
+// Full rule: NFULL {A,B,D} + MFULL {A(dup of NFULL), C(only), D(only)}
+const m1 = mergeAsymmetric([cA_N, cB_N, cD_N], [cA_M, cC_M, cD_M]);
+ok('merge: every NFULL row kept', m1.counts.nfull === 3);
+ok('merge: MFULL copy that exists in NFULL is omitted (A_MFULL)', m1.counts.mfull_omitted === 1);
+ok('merge: omitted row is the MFULL copy', m1.omitted.length === 1 && m1.omitted[0].source === 'MFULL');
+ok('merge: MFULL-only rows kept (C, D)', m1.counts.mfull_only === 2);
+ok('merge: total = all NFULL + MFULL-only',
+  m1.counts.merged_total === 5 && m1.counts.merged_total === m1.counts.nfull + m1.counts.mfull_only);
+
+// NFULL is never deduped against itself — identical NFULL rows both survive.
+const m2 = mergeAsymmetric([cA_N, cA_N], []);
+ok('merge: NFULL internal duplicate is NOT deduped', m2.counts.merged_total === 2);
+
+// No MFULL self-dedup — duplicate MFULL-only rows both survive.
+const m3 = mergeAsymmetric([], [cC_M, cC_M]);
+ok('merge: MFULL-only internal duplicate kept (no MFULL self-dedup)',
+  m3.counts.mfull_only === 2 && m3.counts.merged_total === 2);
+
+// A keyless MFULL row can't "exist in NFULL" → always kept.
+const m4 = mergeAsymmetric([cA_N], [toCanonical('MFULL', { 'Company Name': 'Ghost Ltd' })]);
+ok('merge: keyless MFULL row always kept', m4.counts.mfull_only === 1);
 
 console.log(`\nPhase 1 contract: ${passed} checks passed ✅`);

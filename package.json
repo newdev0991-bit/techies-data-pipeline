@@ -19,7 +19,11 @@
     "check:reconcile": "node scripts/check-reconcile.mjs",
     "check:proxy": "node scripts/check-proxy.mjs",
     "check:tick": "node scripts/check-tick.mjs",
+    "report:merge": "node scripts/merge-report.mjs",
+    "list:tabs": "node scripts/list-tabs.mjs",
+    "token:new": "node scripts/get-oauth-token.mjs",
     "smoke": "node scripts/smoke.mjs",
+    "smoke:asymmetric": "node scripts/smoke-asymmetric.mjs",
     "smoke:validation": "node scripts/smoke-validation.mjs",
     "mock:validator": "node scripts/mock-validator.mjs"
   },

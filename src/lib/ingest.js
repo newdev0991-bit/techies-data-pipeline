@@ -1,7 +1,8 @@
 // Set-based bulk ingestion: rows -> canonical -> a staging temp table -> a handful
-// of set-based SQL statements per chunk (raw upsert, master dedup upsert, link,
-// lead_sources, fuzzy flag). This keeps round-trips ~constant per chunk instead of
-// ~6 per row, which is essential over a remote DB (per-row was ~0.8s/row).
+// of set-based SQL statements per chunk (raw upsert, NFULL master upsert, MFULL
+// filtered-against-NFULL upsert, link, lead_sources). Asymmetric rule: keep every
+// NFULL row; drop an MFULL row only if its match_key already exists in NFULL. This
+// keeps round-trips ~constant per chunk (per-row was ~0.8s/row over a remote DB).
 import { withTransaction } from '../db/pool.js';
 import { toCanonical } from './canonical.js';
 import { fingerprint } from './fingerprint.js';
@@ -19,7 +20,7 @@ function cutoverAt() {
 }
 
 const STG_COLS = [
-  'source', 'source_record_id', 'dedup_key', 'post_id', 'url', 'owner_name', 'message',
+  'source', 'source_record_id', 'dedup_key', 'match_key', 'post_id', 'url', 'owner_name', 'message',
   'post_timestamp', 'scrape_timestamp', 'business_name', 'phone', 'phone2', 'email',
   'postcode', 'address1', 'location', 'norm_permalink', 'norm_phone', 'fingerprint', 'raw_payload'
 ];
@@ -31,6 +32,7 @@ async function ingestChunk(client, runId, canonicals) {
     c.source.push(x.source);
     c.source_record_id.push(x.source_record_id);
     c.dedup_key.push(x.dedup_key);
+    c.match_key.push(x.match_key);
     c.post_id.push(x.post_id);
     c.url.push(x.url);
     c.owner_name.push(x.owner_name);
@@ -52,7 +54,7 @@ async function ingestChunk(client, runId, canonicals) {
 
   await client.query(`
     CREATE TEMP TABLE stg (
-      source lead_source_name, source_record_id text, dedup_key text, post_id text,
+      source lead_source_name, source_record_id text, dedup_key text, match_key text, post_id text,
       url text, owner_name text, message text, post_timestamp timestamptz,
       scrape_timestamp timestamptz, business_name text, phone text, phone2 text,
       email text, postcode text, address1 text, location text, norm_permalink text,
@@ -62,9 +64,9 @@ async function ingestChunk(client, runId, canonicals) {
   await client.query(
     `INSERT INTO stg SELECT * FROM unnest(
        $1::lead_source_name[], $2::text[], $3::text[], $4::text[], $5::text[],
-       $6::text[], $7::text[], $8::timestamptz[], $9::timestamptz[], $10::text[],
+       $6::text[], $7::text[], $8::text[], $9::timestamptz[], $10::timestamptz[],
        $11::text[], $12::text[], $13::text[], $14::text[], $15::text[], $16::text[],
-       $17::text[], $18::text[], $19::text[], $20::jsonb[])`,
+       $17::text[], $18::text[], $19::text[], $20::text[], $21::jsonb[])`,
     STG_COLS.map((k) => c[k])
   );
 
@@ -80,19 +82,39 @@ async function ingestChunk(client, runId, canonicals) {
   const rawInserted = rawRes.rows.filter((r) => r.inserted).length;
   const rawUpdated = rawRes.rows.length - rawInserted;
 
-  // 2. master_leads: one per dedup_key. New keys only (ON CONFLICT DO NOTHING).
-  const masterRes = await client.query(
-    `INSERT INTO master_leads
-       (dedup_key, post_id, url, owner_name, message, post_timestamp, scrape_timestamp,
-        business_name, phone, phone2, email, postcode, address1, location, norm_permalink, norm_phone, fingerprint, status)
-     SELECT DISTINCT ON (dedup_key)
-        dedup_key, post_id, url, owner_name, message, post_timestamp, scrape_timestamp,
-        business_name, phone, phone2, email, postcode, address1, location, norm_permalink, norm_phone, fingerprint, 'INGESTED'
-       FROM stg ORDER BY dedup_key
+  // 2. master_leads — ASYMMETRIC rule (one master per distinct row; dedup_key is a
+  //    per-row hash so nothing collapses within a source):
+  //    (2a) keep EVERY NFULL row; (2b) keep an MFULL row only when its match_key is
+  //    NULL or not already present among NFULL masters. NFULL is inserted first so
+  //    (2b) compares against a complete NFULL base (even within one mixed chunk).
+  const masterCols = `dedup_key, source, match_key, post_id, url, owner_name, message, post_timestamp,
+        scrape_timestamp, business_name, phone, phone2, email, postcode, address1, location,
+        norm_permalink, norm_phone, fingerprint, status`;
+  const masterSel = `dedup_key, source, match_key, post_id, url, owner_name, message, post_timestamp,
+        scrape_timestamp, business_name, phone, phone2, email, postcode, address1, location,
+        norm_permalink, norm_phone, fingerprint, 'INGESTED'`;
+
+  const nfullRes = await client.query(
+    `INSERT INTO master_leads (${masterCols})
+     SELECT DISTINCT ON (dedup_key) ${masterSel}
+       FROM stg WHERE source = 'NFULL' ORDER BY dedup_key
      ON CONFLICT (dedup_key) DO NOTHING
      RETURNING id`
   );
-  const newMasterIds = masterRes.rows.map((r) => r.id);
+
+  const mfullRes = await client.query(
+    `INSERT INTO master_leads (${masterCols})
+     SELECT DISTINCT ON (dedup_key) ${masterSel}
+       FROM stg s
+      WHERE s.source = 'MFULL'
+        AND (s.match_key IS NULL
+             OR NOT EXISTS (SELECT 1 FROM master_leads n WHERE n.source = 'NFULL' AND n.match_key = s.match_key))
+      ORDER BY dedup_key
+     ON CONFLICT (dedup_key) DO NOTHING
+     RETURNING id`
+  );
+
+  const newMasterIds = [...nfullRes.rows, ...mfullRes.rows].map((r) => r.id);
   const inserted = newMasterIds.length;
 
   // 3. link raw_leads -> master via dedup_key.
@@ -114,33 +136,14 @@ async function ingestChunk(client, runId, canonicals) {
      ON CONFLICT (master_lead_id, source) DO UPDATE SET last_seen = now(), raw_lead_id = EXCLUDED.raw_lead_id`
   );
 
-  // 5. secondary/fuzzy flag: a NEW master whose business+postcode fingerprint
-  //    matches an OLDER master gets flagged for review (never auto-merged).
-  let flagged = 0;
-  if (newMasterIds.length) {
-    const flagRes = await client.query(
-      `UPDATE master_leads t
-          SET possible_duplicate_of = (
-            SELECT min(o.id) FROM master_leads o
-             WHERE o.fingerprint = t.fingerprint AND o.id < t.id)
-        WHERE t.id = ANY($1)
-          AND t.fingerprint IS NOT NULL
-          AND t.possible_duplicate_of IS NULL
-          AND EXISTS (SELECT 1 FROM master_leads o WHERE o.fingerprint = t.fingerprint AND o.id < t.id)`,
-      [newMasterIds]
-    );
-    flagged = flagRes.rowCount;
-    if (flagged) {
-      await client.query(
-        `INSERT INTO audit_logs (entity, entity_id, action, actor, detail)
-         SELECT 'master_lead', id::text, 'possible_duplicate_flagged', 'system',
-                jsonb_build_object('possible_duplicate_of', possible_duplicate_of)
-           FROM master_leads
-          WHERE id = ANY($1) AND possible_duplicate_of IS NOT NULL`,
-        [newMasterIds]
-      );
-    }
-  }
+  // 5. count MFULL rows dropped because they already exist in NFULL (asymmetric rule).
+  //    (Replaces the old fuzzy possible_duplicate flag, which the new model retires.)
+  const omitRes = await client.query(
+    `SELECT count(*)::int AS omitted FROM stg s
+      WHERE s.source = 'MFULL' AND s.match_key IS NOT NULL
+        AND EXISTS (SELECT 1 FROM master_leads n WHERE n.source = 'NFULL' AND n.match_key = s.match_key)`
+  );
+  const mfullOmitted = omitRes.rows[0].omitted;
 
   // 6. enqueue validation for NEW post-cutover masters (backfill policy).
   let jobsCreated = 0;
@@ -164,7 +167,7 @@ async function ingestChunk(client, runId, canonicals) {
     }
   }
 
-  return { received: canonicals.length, inserted, rawUpdated, flagged, jobsCreated };
+  return { received: canonicals.length, inserted, rawUpdated, mfullOmitted, jobsCreated };
 }
 
 /**
@@ -185,9 +188,12 @@ export async function ingestItems({ items, runSource = null, idempotencyKey = nu
     };
   }
 
-  const canonicals = items.map((it) => toCanonical(it.source, it.row));
+  // Ingest all NFULL rows before any MFULL, so the "MFULL exists in NFULL" check
+  // always sees a complete NFULL base — even when a single batch mixes both sources.
+  const canonicals = items.map((it) => toCanonical(it.source, it.row))
+    .sort((a, b) => (a.source === 'NFULL' ? 0 : 1) - (b.source === 'NFULL' ? 0 : 1));
 
-  let received = 0; let inserted = 0; let updated = 0; let flagged = 0; let jobsCreated = 0; let errors = 0;
+  let received = 0; let inserted = 0; let updated = 0; let mfullOmitted = 0; let jobsCreated = 0; let errors = 0;
   const errorSamples = [];
 
   for (let i = 0; i < canonicals.length; i += CHUNK) {
@@ -195,7 +201,7 @@ export async function ingestItems({ items, runSource = null, idempotencyKey = nu
     try {
       const r = await withTransaction((client) => ingestChunk(client, run.id, chunk));
       received += r.received; inserted += r.inserted; updated += r.rawUpdated;
-      flagged += r.flagged; jobsCreated += r.jobsCreated;
+      mfullOmitted += r.mfullOmitted; jobsCreated += r.jobsCreated;
     } catch (err) {
       errors += chunk.length;
       if (errorSamples.length < 5) errorSamples.push(err.message);
@@ -210,7 +216,7 @@ export async function ingestItems({ items, runSource = null, idempotencyKey = nu
     duplicates,
     errors,
     status: errors > 0 && inserted === 0 ? 'FAILED' : 'COMPLETED',
-    detail: { possible_duplicates_flagged: flagged, validation_jobs_created: jobsCreated, error_samples: errorSamples }
+    detail: { mfull_omitted: mfullOmitted, validation_jobs_created: jobsCreated, error_samples: errorSamples }
   };
   await finishRun(run.id, counts);
   return { run_id: run.id, ...counts, replayed: false };

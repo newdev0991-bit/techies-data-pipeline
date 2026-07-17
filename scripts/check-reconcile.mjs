@@ -91,17 +91,17 @@ async function run() {
     let masters = (await pool.query('SELECT count(*)::int c FROM master_leads')).rows[0].c;
     ok('NFULL leads ingested despite MFULL being down', masters === 2);
 
-    console.log('reconcile pass 2: MFULL restored -> converges lead A');
+    console.log('reconcile pass 2: MFULL restored -> A_MFULL omitted (already in NFULL by phone)');
     process.env.MFULL_CSV_URL = `http://127.0.0.1:${SOURCE_PORT}/mfull.csv`;
     // reconcile.js read SOURCES at import; re-import a fresh module instance.
     const fresh = await import(`../src/reconcile.js?ts=${Date.now()}`);
     await fresh.main();
     masters = (await pool.query('SELECT count(*)::int c FROM master_leads')).rows[0].c;
-    ok('still 2 masters (A converged, not duplicated)', masters === 2);
+    ok('still 2 masters (A_MFULL omitted, not duplicated)', masters === 2);
     const both = await pool.query(
       `SELECT count(*)::int c FROM (SELECT master_lead_id FROM lead_sources GROUP BY master_lead_id HAVING count(DISTINCT source)=2) x`
     );
-    ok('lead A now found by BOTH sources', both.rows[0].c === 1);
+    ok('nothing is BOTH (asymmetric: A_MFULL omitted, never merged)', both.rows[0].c === 0);
 
     console.log('reconcile pass 3: idempotent re-run adds nothing');
     const fresh2 = await import(`../src/reconcile.js?ts=${Date.now()}b`);

@@ -1,8 +1,8 @@
 // Money-free end-to-end verification (Docker Postgres + synthetic data, no
-// OpenAI/Apify/Google). Proves the Milestone-1 completion conditions:
-//  1. idempotent re-ingest -> 0 new master leads
-//  2. same lead from NFULL + MFULL -> one master with two lead_sources (BOTH)
-//  3. exact dedup + secondary (fuzzy) flagging
+// OpenAI/Apify/Google). Proves the ASYMMETRIC-dedup lifecycle:
+//  1. every NFULL row kept; idempotent re-ingest -> 0 new master leads
+//  2. an MFULL row that already exists in NFULL is OMITTED (never merged; no BOTH)
+//  3. MFULL-only rows kept; masters are single-source
 //  4. read API filters (source/exported/csv) + /api/stats totals
 import assert from 'node:assert/strict';
 import { app } from '../src/server.js';
@@ -61,34 +61,32 @@ async function run() {
     ok('0 duplicates', n1.duplicates === 0);
     ok('master count = 3', (await masterCount()) === 3);
 
-    console.log('ingest MFULL batch (A dup, C new, D_MFULL flagged-new)');
+    console.log('ingest MFULL batch (A already-in-NFULL by phone → omitted; C, D_MFULL kept)');
     const m1 = await ingest('/internal/ingest/mfull', MFULL_BATCH);
     ok('3 received', m1.records_received === 3);
     ok('2 new masters (C, D_MFULL)', m1.records_inserted === 2);
-    ok('1 duplicate (A matched by permalink)', m1.duplicates === 1);
+    ok('1 omitted (A_MFULL matched NFULL by phone)', m1.duplicates === 1);
     ok('master count = 5', (await masterCount()) === 5);
 
-    console.log('cross-source convergence: lead A found by BOTH');
+    console.log('asymmetric rule: A_MFULL omitted (already in NFULL), nothing is BOTH');
     const both = (await apiGet('/api/leads?source=BOTH')).json();
-    ok('exactly 1 lead found by BOTH', both.total === 1);
-    ok('that lead has source badge BOTH', both.leads[0].source === 'BOTH');
-    ok('BOTH lead shows company (merged from payloads)', !!both.leads[0]['Company Name']);
-    const aSources = await pool.query(
-      `SELECT count(*)::int AS c FROM lead_sources ls
-        JOIN master_leads m ON m.id = ls.master_lead_id
-       WHERE m.id = $1`, [both.leads[0].master_id]
+    ok('no lead is BOTH (MFULL copy omitted, never merged)', both.total === 0);
+    const multiSrc = await pool.query(
+      `SELECT count(*)::int AS c FROM (
+         SELECT master_lead_id FROM lead_sources GROUP BY master_lead_id HAVING count(DISTINCT source) > 1
+       ) t`
     );
-    ok('BOTH lead has 2 lead_sources rows', aSources.rows[0].c === 2);
+    ok('every master is single-source (no merge)', multiSrc.rows[0].c === 0);
+    const omitted = await pool.query(
+      `SELECT count(*)::int AS c FROM raw_leads WHERE master_lead_id IS NULL AND source = 'MFULL'`
+    );
+    ok('A_MFULL raw kept but unlinked (omitted, not merged)', omitted.rows[0].c === 1);
 
-    console.log('secondary (fuzzy) flag: D_MFULL possible-duplicate of D_NFULL');
+    console.log('no fuzzy flagging in the asymmetric model');
     const flagged = await pool.query(
       'SELECT count(*)::int AS c FROM master_leads WHERE possible_duplicate_of IS NOT NULL'
     );
-    ok('exactly 1 master flagged as possible duplicate', flagged.rows[0].c === 1);
-    const audit = await pool.query(
-      `SELECT count(*)::int AS c FROM audit_logs WHERE action = 'possible_duplicate_flagged'`
-    );
-    ok('audit_log written for the flag', audit.rows[0].c === 1);
+    ok('0 masters flagged as possible duplicate', flagged.rows[0].c === 0);
 
     console.log('idempotent re-ingest (no key): 0 new masters');
     const nBefore = await masterCount();
@@ -112,7 +110,7 @@ async function run() {
     const nfull = (await apiGet('/api/leads?source=NFULL')).json();
     ok('NFULL-involved = 3 (A, B, D_NFULL)', nfull.total === 3);
     const mfull = (await apiGet('/api/leads?source=MFULL')).json();
-    ok('MFULL-involved = 3 (A, C, D_MFULL)', mfull.total === 3);
+    ok('MFULL-involved = 2 (C, D_MFULL; A_MFULL omitted)', mfull.total === 2);
     const csv = await apiGet('/api/leads?format=csv');
     ok('csv has header row', csv.text.split('\n')[0].includes('Company Name'));
     ok('csv content-type text/csv', true); // header asserted via successful parse below
@@ -121,13 +119,13 @@ async function run() {
     console.log('/api/stats');
     const stats = (await apiGet('/api/stats')).json();
     ok('combined_unique = 5', stats.overview.combined_unique === 5);
-    ok('found_by_both = 1', stats.source_comparison.found_by_both === 1);
-    ok('nfull_only = 2 (B, D_NFULL)', stats.source_comparison.nfull_only === 2);
+    ok('found_by_both = 0 (asymmetric: nothing merged)', stats.source_comparison.found_by_both === 0);
+    ok('nfull_only = 3 (A, B, D_NFULL)', stats.source_comparison.nfull_only === 3);
     ok('mfull_only = 2 (C, D_MFULL)', stats.source_comparison.mfull_only === 2);
-    ok('duplicates_removed = 1', stats.overview.duplicates_removed === 1);
+    ok('duplicates_removed = 1 (A_MFULL omitted)', stats.overview.duplicates_removed === 1);
 
     console.log('exports tracking');
-    const aId = both.leads[0].master_id;
+    const aId = all.leads[0].master_id;
     const exp = await fetch(`${base}/api/exports`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': KEY },

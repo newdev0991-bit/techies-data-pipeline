@@ -89,12 +89,37 @@ export async function readSheetRows({ saJson, tokenJson, spreadsheetId, range })
   return valuesToRows(res.data.values || []);
 }
 
+/** Raw values for a range (array of arrays), no row-object mapping — for diagnostics. */
+export async function readRawValues({ saJson, tokenJson, spreadsheetId, range }) {
+  const auth = authClient({ saJson, tokenJson });
+  const sheets = google.sheets({ version: 'v4', auth });
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId, range: quoteRange(range) });
+  return res.data.values || [];
+}
+
 /** List the tab titles of a spreadsheet (for diagnosing range/name issues). */
 export async function listSheetTitles({ saJson, tokenJson, spreadsheetId }) {
   const auth = authClient({ saJson, tokenJson });
   const sheets = google.sheets({ version: 'v4', auth });
   const res = await sheets.spreadsheets.get({ spreadsheetId, fields: 'sheets.properties.title' });
   return (res.data.sheets || []).map((s) => s.properties.title);
+}
+
+/** List tabs with their grid dimensions (cheap metadata) — for locating which tab
+ *  holds the full data. rowCount is the grid extent, a strong hint (not the exact
+ *  populated count, which needs a values read). */
+export async function listSheetsMeta({ saJson, tokenJson, spreadsheetId }) {
+  const auth = authClient({ saJson, tokenJson });
+  const sheets = google.sheets({ version: 'v4', auth });
+  const res = await sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: 'sheets.properties(title,gridProperties(rowCount,columnCount))'
+  });
+  return (res.data.sheets || []).map((s) => ({
+    title: s.properties.title,
+    rowCount: s.properties.gridProperties?.rowCount ?? null,
+    columnCount: s.properties.gridProperties?.columnCount ?? null
+  }));
 }
 
 // Per-source config from env. Falls back to a shared GOOGLE_OAUTH_TOKEN_JSON if a
