@@ -6,6 +6,7 @@
 // (leading blank rows skipped — MFULL's raw export has an empty first row + a
 // junk trailing column). The existing toCanonical() then maps either schema.
 import { google } from 'googleapis';
+import { tagSourceOccurrences } from './canonical.js';
 
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly'];
 
@@ -78,7 +79,7 @@ export function quoteRange(range) {
   return `${sheet}!${cells}`;
 }
 
-export async function readSheetRows({ saJson, tokenJson, spreadsheetId, range }) {
+export async function readSheetRows({ name, saJson, tokenJson, spreadsheetId, range }) {
   if (!spreadsheetId) throw new Error('missing spreadsheetId');
   const auth = authClient({ saJson, tokenJson });
   const sheets = google.sheets({ version: 'v4', auth });
@@ -86,7 +87,8 @@ export async function readSheetRows({ saJson, tokenJson, spreadsheetId, range })
     spreadsheetId,
     range: quoteRange(range || 'A:Z')
   });
-  return valuesToRows(res.data.values || []);
+  const rows = valuesToRows(res.data.values || []);
+  return name ? tagSourceOccurrences(name, rows) : rows;
 }
 
 /** List the tab titles of a spreadsheet (for diagnosing range/name issues). */
@@ -103,19 +105,21 @@ export function sourceConfigs() {
   const sharedSa = process.env.GOOGLE_SA_JSON;
   const sharedOauth = process.env.GOOGLE_OAUTH_TOKEN_JSON;
   return [
-    {
-      name: 'NFULL',
-      saJson: process.env.NFULL_GOOGLE_SA_JSON || sharedSa,
-      tokenJson: process.env.NFULL_GOOGLE_OAUTH_TOKEN_JSON || sharedOauth,
-      spreadsheetId: process.env.NFULL_SPREADSHEET_ID,
-      range: process.env.NFULL_SHEET_RANGE || 'Sheet1!A:Z'
-    },
+    // MFULL is ephemeral (source rows are deleted after 24 hours), so capture it
+    // before the larger NFULL sheet whenever both are requested in one tick.
     {
       name: 'MFULL',
       saJson: process.env.MFULL_GOOGLE_SA_JSON || sharedSa,
       tokenJson: process.env.MFULL_GOOGLE_OAUTH_TOKEN_JSON || sharedOauth,
       spreadsheetId: process.env.MFULL_SPREADSHEET_ID,
       range: process.env.MFULL_SHEET_RANGE || 'A1:Z'
+    },
+    {
+      name: 'NFULL',
+      saJson: process.env.NFULL_GOOGLE_SA_JSON || sharedSa,
+      tokenJson: process.env.NFULL_GOOGLE_OAUTH_TOKEN_JSON || sharedOauth,
+      spreadsheetId: process.env.NFULL_SPREADSHEET_ID,
+      range: process.env.NFULL_SHEET_RANGE || 'Sheet1!A:Z'
     }
   ].filter((c) => c.spreadsheetId && (c.saJson || c.tokenJson));
 }

@@ -51,6 +51,14 @@ async function run() {
     ok('tick validated the 2 pending jobs', r.json.validated === 2);
     ok('tick did no ingest (no sources configured)', Array.isArray(r.json.ingest) && r.json.ingest.length === 0);
 
+    const missingMfull = await tick({ sources: ['MFULL'], validate: 0 });
+    ok('explicit unconfigured MFULL capture reports failure',
+      missingMfull.status === 200 && missingMfull.json.ok === false &&
+      missingMfull.json.errors.some((e) => e.includes('MFULL: source is not configured')));
+
+    const invalidSource = await tick({ sources: ['OTHER'], validate: 0 });
+    ok('invalid source selector -> 400', invalidSource.status === 400);
+
     const decided = (await pool.query("SELECT count(*)::int c FROM master_leads WHERE status IN ('APPROVED','REVIEW_REQUIRED','REJECTED')")).rows[0].c;
     ok('both leads now have decisions', decided === 2);
 

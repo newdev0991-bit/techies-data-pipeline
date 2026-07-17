@@ -19,9 +19,15 @@ pipelineRouter.get('/status', async (_req, res) => {
     );
     const totals = await pool.query(
       `SELECT
-         (SELECT count(*) FROM master_leads) AS master_leads,
-         (SELECT count(*) FROM raw_leads) AS raw_leads,
-         (SELECT count(*) FROM master_leads WHERE possible_duplicate_of IS NOT NULL) AS flagged_possible_duplicates`
+         (SELECT count(*) FROM master_leads WHERE hidden_from_combined = false) AS master_leads,
+         (SELECT count(*) FROM master_leads) AS stored_master_leads,
+         (SELECT count(*) FROM master_leads WHERE hidden_from_combined = true) AS hidden_master_leads,
+         (SELECT count(*) FROM master_leads WHERE hidden_reason = 'MFULL_PHONE_IN_NFULL') AS suppressed_mfull_copies,
+         (SELECT count(*) FROM raw_leads r JOIN master_leads m ON m.id = r.master_lead_id
+           WHERE m.hidden_from_combined = false) AS raw_leads,
+         (SELECT count(*) FROM raw_leads) AS stored_raw_leads,
+         (SELECT count(*) FROM master_leads
+           WHERE hidden_from_combined = false AND possible_duplicate_of IS NOT NULL) AS flagged_possible_duplicates`
     );
     return res.json({
       ok: true,

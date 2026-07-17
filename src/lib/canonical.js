@@ -89,29 +89,92 @@ function sha256(s) {
   return createHash('sha256').update(s).digest('hex');
 }
 
-export function sourceRecordId(source, row, normPermalink) {
-  if (normPermalink) return sha256(`${source}|${normPermalink}`);
-  const values = Object.keys(row).sort().map((k) => `${k}=${row[k]}`).join('');
+export function sourceRecordId(source, row) {
+  // A source occurrence is a stable row signature, not its URL or phone alone.
+  // This preserves distinct NFULL rows that happen to share either value.
+  const values = Object.keys(row)
+    .filter((k) => !String(k).startsWith('__pipeline_'))
+    .sort()
+    .map((k) => `${k}=${row[k]}`)
+    .join('\u001f');
   return sha256(`${source}|${values}`);
+}
+
+/**
+ * Give repeated, canonically equivalent source rows stable occurrence
+ * ordinals. The ordinal is per row signature, rather than an absolute sheet row
+ * number, so inserting an unrelated row above it does not change its identity.
+ */
+export function tagSourceOccurrences(source, rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (list.every((row) => Number.isInteger(row?.__pipeline_source_occurrence))) return list;
+
+  const seen = new Map();
+  return list.map((row) => {
+    const clean = { ...(row || {}) };
+    delete clean.__pipeline_source_occurrence;
+    const baseId = toCanonical(source, clean).source_record_id;
+    const occurrence = (seen.get(baseId) || 0) + 1;
+    seen.set(baseId, occurrence);
+    return { ...clean, __pipeline_source_occurrence: occurrence };
+  });
+}
+
+/**
+ * Source-precedence identity policy:
+ * - NFULL is authoritative, so its distinct source rows never merge by phone.
+ * - MFULL keeps one row per normalized phone.
+ * - A phone-less MFULL row cannot be matched safely, so it keeps a row identity.
+ *
+ * Cross-source MFULL-vs-NFULL suppression happens during ingestion, where the
+ * database can check whether an NFULL phone is already present.
+ */
+export function dedupKey(source, sourceRecordIdValue, normPhone) {
+  if (source === 'NFULL') return `nfull-row:${sourceRecordIdValue}`;
+  if (source === 'MFULL' && normPhone) return `mfull-phone:${normPhone}`;
+  return `mfull-row:${sourceRecordIdValue}`;
 }
 
 /** Map any source row (NFULL or MFULL vocabulary) to the canonical lead. */
 export function toCanonical(source, row) {
   const lookup = buildLookup(row);
   const url = get(lookup, 'url');
+  const message = get(lookup, 'message');
+  const timestamp = get(lookup, 'timestamp');
+  const postingDate = get(lookup, 'posting_date');
+  const businessName = get(lookup, 'business_name');
+  const primaryPhone = get(lookup, 'phone');
+  const phone2 = get(lookup, 'phone2');
+  const phone3 = get(lookup, 'phone3');
+  const postcode = get(lookup, 'postcode');
+  const address1 = get(lookup, 'address1');
   const norm_permalink = normalizePermalink(url);
   const post_id = extractPostId(url);
-  const norm_phone = firstUkPhone(get(lookup, 'phone'), get(lookup, 'phone2'), get(lookup, 'phone3'));
+  const norm_phone = firstUkPhone(primaryPhone, phone2, phone3);
 
   const town = get(lookup, 'town');
   const county = get(lookup, 'county');
   const location = [town, county].filter(Boolean).join(', ') || null;
 
-  const source_record_id = sourceRecordId(source, row, norm_permalink);
-  // Single canonical identity used for set-based dedup. Prefer the normalized
-  // permalink (present on ~all rows and consistent across sources), then post_id,
-  // then phone, then the synthesized per-source id.
-  const dedup_key = norm_permalink || post_id || norm_phone || `rid:${source_record_id}`;
+  // Use the stable cross-adapter fields exposed by the source CSVs. Direct
+  // Google rows can contain extra columns, while the legacy CSV adapter returns
+  // only display columns; those two paths must still identify the same row.
+  const source_record_id = sourceRecordId(source, {
+    source_occurrence: Number.isInteger(row?.__pipeline_source_occurrence)
+      ? row.__pipeline_source_occurrence
+      : null,
+    timestamp,
+    posting_date: postingDate,
+    business_name: businessName,
+    phone: primaryPhone,
+    phone2,
+    message,
+    postcode,
+    address1,
+    town,
+    url
+  });
+  const dedup_key = dedupKey(source, source_record_id, norm_phone);
 
   return {
     source,
@@ -120,15 +183,15 @@ export function toCanonical(source, row) {
     post_id,
     url,
     owner_name: null,
-    message: get(lookup, 'message'),
-    post_timestamp: toIso(get(lookup, 'posting_date')),
-    scrape_timestamp: toIso(get(lookup, 'timestamp')),
-    business_name: get(lookup, 'business_name'),
-    phone: get(lookup, 'phone') || get(lookup, 'phone2'),
-    phone2: get(lookup, 'phone2'),
+    message,
+    post_timestamp: toIso(postingDate),
+    scrape_timestamp: toIso(timestamp),
+    business_name: businessName,
+    phone: primaryPhone || phone2,
+    phone2,
     email: cleanEmail(get(lookup, 'email')),
-    postcode: get(lookup, 'postcode'),
-    address1: get(lookup, 'address1'),
+    postcode,
+    address1,
     location,
     norm_permalink,
     norm_phone,

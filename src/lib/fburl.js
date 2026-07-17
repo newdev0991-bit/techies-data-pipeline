@@ -1,6 +1,7 @@
 // Facebook URL normalization + post-id extraction. Pure, no I/O.
-// Goal: two URLs pointing at the same post produce the same normalized string,
-// so `norm_permalink` is a reliable exact-dedup key.
+// Goal: provide a stable display/audit value for equivalent Facebook URLs.
+// Deduplication policy intentionally does not use this value; MFULL-vs-NFULL
+// matching is phone-only.
 
 const TRACKING_PARAMS = new Set([
   'fbclid', 'mibextid', '__tn__', '__cft__', '__xts__', '__so__',

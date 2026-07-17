@@ -4,6 +4,7 @@
 // (doc sections 2 + 9). Dedup makes re-ingesting the whole CSV safe/idempotent.
 import 'dotenv/config';
 import { csvToObjects } from './lib/csv.js';
+import { tagSourceOccurrences } from './lib/canonical.js';
 
 const TOKEN = process.env.PIPELINE_API_TOKEN;
 const BATCH = Number(process.env.PIPELINE_PUSH_BATCH_SIZE || 100);
@@ -57,7 +58,7 @@ async function reconcileSource(src) {
   if (!src.url) { console.log(`[reconcile] ${src.name}: no CSV URL configured, skipping`); return; }
   try {
     const csv = await fetchCsv(src.url, src.key);
-    const objects = csvToObjects(csv);
+    const objects = tagSourceOccurrences(src.name, csvToObjects(csv));
     if (objects.length === 0) { console.log(`[reconcile] ${src.name}: 0 rows`); return; }
 
     let received = 0; let inserted = 0; let duplicates = 0; let errors = 0;

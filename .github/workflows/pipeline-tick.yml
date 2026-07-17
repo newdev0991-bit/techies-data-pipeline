@@ -10,7 +10,7 @@ on:
   workflow_dispatch: {} # allow manual runs
 
 concurrency:
-  group: pipeline-tick
+  group: pipeline-ingestion
   cancel-in-progress: false
 
 jobs:
@@ -25,12 +25,15 @@ jobs:
           if [ -z "$BASE" ] || [ -z "$TOKEN" ]; then
             echo "Missing PIPELINE_BASE_URL or PIPELINE_API_TOKEN secret"; exit 1
           fi
+          BASE="${BASE%/}"
           # Keep-warm (free web cold-starts after idle); ignore failure.
           curl -s -m 30 "$BASE/health" || true
-          # Run one tick: ingest all sources + validate a batch.
+          # Run one tick: ingest all configured sources + validate a batch.
           code=$(curl -s -m 180 -o /tmp/tick.json -w "%{http_code}" \
             -X POST "$BASE/internal/tick" \
             -H "Authorization: Bearer $TOKEN" \
-            -H "Content-Type: application/json" -d '{}')
+            -H "Content-Type: application/json" \
+            -d '{"sources":["NFULL","MFULL"]}')
           echo "tick HTTP $code"; cat /tmp/tick.json || true
           test "$code" = "200"
+          jq -e '.ok == true' /tmp/tick.json >/dev/null

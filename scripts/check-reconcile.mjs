@@ -1,7 +1,7 @@
 // Phase 3 verification (money-free, no Google): stands up the pipeline web server
 // plus a tiny local "source" HTTP server that returns synthetic NFULL/MFULL CSVs
 // behind an X-API-Key, then runs the reconciliation cron and asserts the leads
-// landed (deduplicated) in Postgres. Also proves per-source outage isolation.
+// landed under the NFULL-first phone policy. Also proves source outage isolation.
 import 'dotenv/config';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -26,7 +26,7 @@ function toCsv(objs, headers) {
 }
 
 // Synthetic CSVs. NFULL emits its 9 columns; MFULL includes lead A too (same
-// proof URL) so reconciliation should converge them to one master.
+// normalized phone) so only the NFULL copy should appear in the combined view.
 const NFULL_ROWS = [
   { 'Lead Statement': 'Grand opening!', 'Timestamp': '2026-07-12 09:00', 'Company Name': 'ABC Café',
     'Phone Number': '01234 567890', 'Address 1 (Road/Street/Lane/Park/Industrial Estate)': '10 High St',
@@ -91,7 +91,7 @@ async function run() {
     let masters = (await pool.query('SELECT count(*)::int c FROM master_leads')).rows[0].c;
     ok('NFULL leads ingested despite MFULL being down', masters === 2);
 
-    console.log('reconcile pass 2: MFULL restored -> converges lead A');
+    console.log('reconcile pass 2: MFULL restored -> phone-matches lead A');
     process.env.MFULL_CSV_URL = `http://127.0.0.1:${SOURCE_PORT}/mfull.csv`;
     // reconcile.js read SOURCES at import; re-import a fresh module instance.
     const fresh = await import(`../src/reconcile.js?ts=${Date.now()}`);

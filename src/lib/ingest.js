@@ -3,7 +3,7 @@
 // lead_sources, fuzzy flag). This keeps round-trips ~constant per chunk instead of
 // ~6 per row, which is essential over a remote DB (per-row was ~0.8s/row).
 import { withTransaction } from '../db/pool.js';
-import { toCanonical } from './canonical.js';
+import { tagSourceOccurrences, toCanonical } from './canonical.js';
 import { fingerprint } from './fingerprint.js';
 import { startRun, finishRun } from './pipelineRuns.js';
 import { RULES_VERSION } from './rules.js';
@@ -24,7 +24,7 @@ const STG_COLS = [
   'postcode', 'address1', 'location', 'norm_permalink', 'norm_phone', 'fingerprint', 'raw_payload'
 ];
 
-async function ingestChunk(client, runId, canonicals) {
+export async function ingestChunk(client, runId, canonicals) {
   // Build one array per staging column for a single unnest-based bulk insert.
   const c = Object.fromEntries(STG_COLS.map((k) => [k, []]));
   for (const x of canonicals) {
@@ -80,41 +80,199 @@ async function ingestChunk(client, runId, canonicals) {
   const rawInserted = rawRes.rows.filter((r) => r.inserted).length;
   const rawUpdated = rawRes.rows.length - rawInserted;
 
-  // 2. master_leads: one per dedup_key. New keys only (ON CONFLICT DO NOTHING).
-  const masterRes = await client.query(
+  // 2. NFULL is authoritative: create one master per distinct NFULL source row.
+  // Phone and URL are deliberately NOT conflict targets for NFULL.
+  const nfullMasterRes = await client.query(
     `INSERT INTO master_leads
        (dedup_key, post_id, url, owner_name, message, post_timestamp, scrape_timestamp,
         business_name, phone, phone2, email, postcode, address1, location, norm_permalink, norm_phone, fingerprint, status)
      SELECT DISTINCT ON (dedup_key)
         dedup_key, post_id, url, owner_name, message, post_timestamp, scrape_timestamp,
         business_name, phone, phone2, email, postcode, address1, location, norm_permalink, norm_phone, fingerprint, 'INGESTED'
-       FROM stg ORDER BY dedup_key
+       FROM stg
+      WHERE source = 'NFULL'
+      ORDER BY dedup_key, source_record_id
      ON CONFLICT (dedup_key) DO NOTHING
      RETURNING id`
   );
-  const newMasterIds = masterRes.rows.map((r) => r.id);
-  const inserted = newMasterIds.length;
 
-  // 3. link raw_leads -> master via dedup_key.
+  // 3. Link NFULL occurrences to their row-specific masters and record source.
   await client.query(
     `UPDATE raw_leads r SET master_lead_id = m.id
        FROM stg s JOIN master_leads m ON m.dedup_key = s.dedup_key
-      WHERE r.source = s.source AND r.source_record_id = s.source_record_id
+      WHERE s.source = 'NFULL'
+        AND r.source = s.source AND r.source_record_id = s.source_record_id
         AND r.master_lead_id IS DISTINCT FROM m.id`
   );
 
-  // 4. lead_sources: which sources found each master (dedupe within-chunk).
   await client.query(
     `INSERT INTO lead_sources (master_lead_id, source, source_record_id, raw_lead_id)
      SELECT DISTINCT ON (m.id, s.source) m.id, s.source, s.source_record_id, r.id
        FROM stg s
        JOIN master_leads m ON m.dedup_key = s.dedup_key
        JOIN raw_leads r ON r.source = s.source AND r.source_record_id = s.source_record_id
+      WHERE s.source = 'NFULL'
       ORDER BY m.id, s.source
      ON CONFLICT (master_lead_id, source) DO UPDATE SET last_seen = now(), raw_lead_id = EXCLUDED.raw_lead_id`
   );
 
-  // 5. secondary/fuzzy flag: a NEW master whose business+postcode fingerprint
+  // If MFULL arrived first, an MFULL-only master may already exist. Once NFULL
+  // has the same normalized phone, move the MFULL occurrence to the first NFULL
+  // row and suppress the obsolete MFULL copy from the combined read model.
+  await client.query(`
+    UPDATE master_leads old
+       SET hidden_from_combined = true,
+           hidden_reason = 'MFULL_PHONE_IN_NFULL',
+           superseded_by_nfull = (
+             SELECT min(n.id)
+               FROM master_leads n
+               JOIN lead_sources nls ON nls.master_lead_id = n.id AND nls.source = 'NFULL'
+              WHERE n.norm_phone = old.norm_phone
+                AND n.id <> old.id
+                AND n.hidden_from_combined = false
+           ),
+           updated_at = now()
+     WHERE old.norm_phone IS NOT NULL
+       AND old.hidden_from_combined = false
+       AND EXISTS (
+         SELECT 1 FROM lead_sources own
+          WHERE own.master_lead_id = old.id AND own.source = 'MFULL'
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM lead_sources own
+          WHERE own.master_lead_id = old.id AND own.source = 'NFULL'
+       )
+       AND EXISTS (
+         SELECT 1
+           FROM master_leads n
+           JOIN lead_sources nls ON nls.master_lead_id = n.id AND nls.source = 'NFULL'
+          WHERE n.norm_phone = old.norm_phone
+            AND n.id <> old.id
+            AND n.hidden_from_combined = false
+       )`);
+
+  await client.query(`
+    UPDATE validation_jobs vj
+       SET status = 'FAILED',
+           last_error = 'Cancelled: MFULL master superseded by NFULL phone match',
+           locked_at = NULL,
+           locked_by = NULL,
+           updated_at = now()
+      FROM master_leads old
+     WHERE old.id = vj.master_lead_id
+       AND old.hidden_reason = 'MFULL_PHONE_IN_NFULL'
+       AND vj.status IN ('PENDING', 'PROCESSING', 'RETRY')`);
+
+  await client.query(`
+    INSERT INTO lead_sources (master_lead_id, source, source_record_id, raw_lead_id)
+    SELECT DISTINCT ON (old.superseded_by_nfull)
+           old.superseded_by_nfull, 'MFULL', ls.source_record_id, ls.raw_lead_id
+      FROM master_leads old
+      JOIN lead_sources ls ON ls.master_lead_id = old.id AND ls.source = 'MFULL'
+     WHERE old.hidden_from_combined = true
+       AND old.superseded_by_nfull IS NOT NULL
+     ORDER BY old.superseded_by_nfull, old.id
+    ON CONFLICT (master_lead_id, source)
+    DO UPDATE SET last_seen = now(), raw_lead_id = EXCLUDED.raw_lead_id`);
+
+  await client.query(`
+    UPDATE raw_leads r
+       SET master_lead_id = old.superseded_by_nfull
+      FROM master_leads old
+     WHERE r.master_lead_id = old.id
+       AND r.source = 'MFULL'
+       AND old.hidden_from_combined = true
+       AND old.superseded_by_nfull IS NOT NULL`);
+
+  await client.query(`
+    DELETE FROM lead_sources ls
+     USING master_leads old
+     WHERE ls.master_lead_id = old.id
+       AND ls.source = 'MFULL'
+       AND old.hidden_from_combined = true
+       AND old.superseded_by_nfull IS NOT NULL`);
+
+  // 4. MFULL: keep one master per normalized phone, but only when that phone is
+  // absent from NFULL. A phone-less MFULL row cannot be safely matched, so it is
+  // kept by its row identity.
+  const mfullMasterRes = await client.query(
+    `INSERT INTO master_leads
+       (dedup_key, post_id, url, owner_name, message, post_timestamp, scrape_timestamp,
+        business_name, phone, phone2, email, postcode, address1, location, norm_permalink, norm_phone, fingerprint, status)
+     SELECT DISTINCT ON (s.dedup_key)
+        s.dedup_key, s.post_id, s.url, s.owner_name, s.message, s.post_timestamp, s.scrape_timestamp,
+        s.business_name, s.phone, s.phone2, s.email, s.postcode, s.address1, s.location,
+        s.norm_permalink, s.norm_phone, s.fingerprint, 'INGESTED'
+       FROM stg s
+      WHERE s.source = 'MFULL'
+        AND (
+          s.norm_phone IS NULL OR NOT EXISTS (
+            SELECT 1
+              FROM master_leads n
+              JOIN lead_sources nls ON nls.master_lead_id = n.id AND nls.source = 'NFULL'
+             WHERE n.norm_phone = s.norm_phone
+               AND n.hidden_from_combined = false
+          )
+        )
+      ORDER BY s.dedup_key, s.source_record_id
+     ON CONFLICT (dedup_key) DO NOTHING
+     RETURNING id`
+  );
+
+  // Prefer an NFULL target with the same phone. Otherwise link the occurrence to
+  // its one-per-phone MFULL master.
+  await client.query(`
+    WITH targets AS (
+      SELECT DISTINCT ON (r.id)
+             r.id AS raw_id,
+             COALESCE(
+               (
+                 SELECT min(n.id)
+                   FROM master_leads n
+                   JOIN lead_sources nls ON nls.master_lead_id = n.id AND nls.source = 'NFULL'
+                  WHERE s.norm_phone IS NOT NULL
+                    AND n.norm_phone = s.norm_phone
+                    AND n.hidden_from_combined = false
+               ),
+               (
+                 SELECT m.id FROM master_leads m
+                  WHERE m.dedup_key = s.dedup_key
+                    AND m.hidden_from_combined = false
+                  LIMIT 1
+               )
+             ) AS target_id
+        FROM stg s
+        JOIN raw_leads r ON r.source = s.source AND r.source_record_id = s.source_record_id
+       WHERE s.source = 'MFULL'
+       ORDER BY r.id, s.source_record_id
+    )
+    UPDATE raw_leads r
+       SET master_lead_id = t.target_id
+      FROM targets t
+     WHERE r.id = t.raw_id
+       AND t.target_id IS NOT NULL
+       AND r.master_lead_id IS DISTINCT FROM t.target_id`);
+
+  await client.query(
+    `INSERT INTO lead_sources (master_lead_id, source, source_record_id, raw_lead_id)
+     SELECT DISTINCT ON (r.master_lead_id)
+            r.master_lead_id, 'MFULL', s.source_record_id, r.id
+       FROM stg s
+       JOIN raw_leads r ON r.source = s.source AND r.source_record_id = s.source_record_id
+      WHERE s.source = 'MFULL' AND r.master_lead_id IS NOT NULL
+      ORDER BY r.master_lead_id, s.source_record_id
+     ON CONFLICT (master_lead_id, source)
+     DO UPDATE SET last_seen = now(), raw_lead_id = EXCLUDED.raw_lead_id`
+  );
+
+  const newMasterIds = [
+    ...nfullMasterRes.rows.map((r) => r.id),
+    ...mfullMasterRes.rows.map((r) => r.id)
+  ];
+  const inserted = newMasterIds.length;
+
+  // 5. Secondary/fuzzy matches are advisory only. They never suppress or merge.
+  // A NEW master whose business+postcode fingerprint
   //    matches an OLDER master gets flagged for review (never auto-merged).
   let flagged = 0;
   if (newMasterIds.length) {
@@ -122,11 +280,17 @@ async function ingestChunk(client, runId, canonicals) {
       `UPDATE master_leads t
           SET possible_duplicate_of = (
             SELECT min(o.id) FROM master_leads o
-             WHERE o.fingerprint = t.fingerprint AND o.id < t.id)
+             WHERE o.fingerprint = t.fingerprint AND o.id < t.id
+               AND o.hidden_from_combined = false)
         WHERE t.id = ANY($1)
+          AND t.hidden_from_combined = false
           AND t.fingerprint IS NOT NULL
           AND t.possible_duplicate_of IS NULL
-          AND EXISTS (SELECT 1 FROM master_leads o WHERE o.fingerprint = t.fingerprint AND o.id < t.id)`,
+          AND EXISTS (
+            SELECT 1 FROM master_leads o
+             WHERE o.fingerprint = t.fingerprint AND o.id < t.id
+               AND o.hidden_from_combined = false
+          )`,
       [newMasterIds]
     );
     flagged = flagRes.rowCount;
@@ -185,7 +349,20 @@ export async function ingestItems({ items, runSource = null, idempotencyKey = nu
     };
   }
 
-  const canonicals = items.map((it) => toCanonical(it.source, it.row));
+  // Preserve every source occurrence, including otherwise-identical rows. Most
+  // full-sheet adapters tag before batching; this fallback also makes direct API
+  // calls deterministic within each submitted source batch.
+  const prepared = [...items];
+  for (const source of ['NFULL', 'MFULL']) {
+    const indexes = [];
+    const rows = [];
+    prepared.forEach((it, index) => {
+      if (it.source === source) { indexes.push(index); rows.push(it.row); }
+    });
+    const tagged = tagSourceOccurrences(source, rows);
+    indexes.forEach((index, i) => { prepared[index] = { ...prepared[index], row: tagged[i] }; });
+  }
+  const canonicals = prepared.map((it) => toCanonical(it.source, it.row));
 
   let received = 0; let inserted = 0; let updated = 0; let flagged = 0; let jobsCreated = 0; let errors = 0;
   const errorSamples = [];

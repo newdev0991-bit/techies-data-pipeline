@@ -32,11 +32,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function claimJob() {
   const { rows } = await pool.query(
     `WITH j AS (
-       SELECT id FROM validation_jobs
-        WHERE status IN ('PENDING','RETRY')
-          AND (next_retry_at IS NULL OR next_retry_at <= now())
-        ORDER BY created_at
-        FOR UPDATE SKIP LOCKED
+       SELECT vj.id
+         FROM validation_jobs vj
+         JOIN master_leads m ON m.id = vj.master_lead_id
+        WHERE vj.status IN ('PENDING','RETRY')
+          AND (vj.next_retry_at IS NULL OR vj.next_retry_at <= now())
+          AND m.hidden_from_combined = false
+        ORDER BY vj.created_at
+        FOR UPDATE OF vj SKIP LOCKED
         LIMIT 1
      )
      UPDATE validation_jobs vj
@@ -106,7 +109,10 @@ async function storeEvidence(masterId, ev, provider) {
 
 // ---- job processing ----
 async function processJob(job) {
-  const master = (await pool.query('SELECT * FROM master_leads WHERE id = $1', [job.master_lead_id])).rows[0];
+  const master = (await pool.query(
+    'SELECT * FROM master_leads WHERE id = $1 AND hidden_from_combined = false',
+    [job.master_lead_id]
+  )).rows[0];
   if (!master) { await finishJob(job.id, 'COMPLETED'); return; }
 
   await setMasterStatus(master.id, 'VALIDATING');

@@ -1,9 +1,10 @@
 // Money-free end-to-end verification (Docker Postgres + synthetic data, no
 // OpenAI/Apify/Google). Proves the Milestone-1 completion conditions:
 //  1. idempotent re-ingest -> 0 new master leads
-//  2. same lead from NFULL + MFULL -> one master with two lead_sources (BOTH)
-//  3. exact dedup + secondary (fuzzy) flagging
-//  4. read API filters (source/exported/csv) + /api/stats totals
+//  2. MFULL-vs-NFULL matching uses normalized phone only
+//  3. NFULL rows sharing a phone remain separate; MFULL rows sharing one keep one
+//  4. secondary (fuzzy) flagging remains advisory only
+//  5. read API filters (source/exported/csv) + /api/stats totals
 import assert from 'node:assert/strict';
 import { app } from '../src/server.js';
 import { pool } from '../src/db/pool.js';
@@ -54,19 +55,19 @@ async function run() {
   base = `http://127.0.0.1:${PORT}`;
 
   try {
-    console.log('ingest NFULL batch (A, B, D)');
+    console.log('ingest NFULL batch (A, B, B2 same-phone, D)');
     const n1 = await ingest('/internal/ingest/nfull', NFULL_BATCH);
-    ok('3 received', n1.records_received === 3);
-    ok('3 new masters inserted', n1.records_inserted === 3);
+    ok('4 received', n1.records_received === 4);
+    ok('all 4 NFULL rows inserted', n1.records_inserted === 4);
     ok('0 duplicates', n1.duplicates === 0);
-    ok('master count = 3', (await masterCount()) === 3);
+    ok('master count = 4', (await masterCount()) === 4);
 
-    console.log('ingest MFULL batch (A dup, C new, D_MFULL flagged-new)');
+    console.log('ingest MFULL batch (A in NFULL, C new, C phone-dup, D new)');
     const m1 = await ingest('/internal/ingest/mfull', MFULL_BATCH);
-    ok('3 received', m1.records_received === 3);
+    ok('4 received', m1.records_received === 4);
     ok('2 new masters (C, D_MFULL)', m1.records_inserted === 2);
-    ok('1 duplicate (A matched by permalink)', m1.duplicates === 1);
-    ok('master count = 5', (await masterCount()) === 5);
+    ok('2 MFULL copies omitted by phone (A and duplicate C)', m1.duplicates === 2);
+    ok('master count = 6', (await masterCount()) === 6);
 
     console.log('cross-source convergence: lead A found by BOTH');
     const both = (await apiGet('/api/leads?source=BOTH')).json();
@@ -96,7 +97,7 @@ async function run() {
     const reM = await ingest('/internal/ingest/mfull', MFULL_BATCH);
     ok('re-ingest NFULL: 0 inserted', reN.records_inserted === 0);
     ok('re-ingest MFULL: 0 inserted', reM.records_inserted === 0);
-    ok('re-ingest updates raw rows', reN.records_updated === 3 && reM.records_updated === 3);
+    ok('re-ingest updates raw rows', reN.records_updated === 4 && reM.records_updated === 4);
     ok('master count unchanged after re-ingest', (await masterCount()) === nBefore);
 
     console.log('idempotency-key replay: second call is a no-op replay');
@@ -108,9 +109,9 @@ async function run() {
 
     console.log('read API filters');
     const all = (await apiGet('/api/leads')).json();
-    ok('total leads = 5', all.total === 5);
+    ok('total leads = 6', all.total === 6);
     const nfull = (await apiGet('/api/leads?source=NFULL')).json();
-    ok('NFULL-involved = 3 (A, B, D_NFULL)', nfull.total === 3);
+    ok('NFULL-involved = 4 (all authoritative rows)', nfull.total === 4);
     const mfull = (await apiGet('/api/leads?source=MFULL')).json();
     ok('MFULL-involved = 3 (A, C, D_MFULL)', mfull.total === 3);
     const csv = await apiGet('/api/leads?format=csv');
@@ -120,11 +121,11 @@ async function run() {
 
     console.log('/api/stats');
     const stats = (await apiGet('/api/stats')).json();
-    ok('combined_unique = 5', stats.overview.combined_unique === 5);
+    ok('combined_unique = 6', stats.overview.combined_unique === 6);
     ok('found_by_both = 1', stats.source_comparison.found_by_both === 1);
-    ok('nfull_only = 2 (B, D_NFULL)', stats.source_comparison.nfull_only === 2);
+    ok('nfull_only = 3 (B, B2, D_NFULL)', stats.source_comparison.nfull_only === 3);
     ok('mfull_only = 2 (C, D_MFULL)', stats.source_comparison.mfull_only === 2);
-    ok('duplicates_removed = 1', stats.overview.duplicates_removed === 1);
+    ok('duplicates_removed = 2', stats.overview.duplicates_removed === 2);
 
     console.log('exports tracking');
     const aId = both.leads[0].master_id;
@@ -137,7 +138,7 @@ async function run() {
     const exported = (await apiGet('/api/leads?exported=true')).json();
     ok('1 lead exported=true', exported.total === 1);
     const notExported = (await apiGet('/api/leads?exported=false')).json();
-    ok('4 leads exported=false', notExported.total === 4);
+    ok('5 leads exported=false', notExported.total === 5);
 
     console.log(`\nPhase 2 smoke: ${passed} checks passed ✅`);
   } finally {

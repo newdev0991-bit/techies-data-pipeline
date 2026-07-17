@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { normalizePermalink, extractPostId } from '../src/lib/fburl.js';
 import { normalizeUkPhone } from '../src/lib/phone.js';
 import { businessKey, fingerprint } from '../src/lib/fingerprint.js';
-import { toCanonical, toLeadRow } from '../src/lib/canonical.js';
+import { tagSourceOccurrences, toCanonical, toLeadRow } from '../src/lib/canonical.js';
 import { valuesToRows } from '../src/lib/sheets.js';
 import { A_NFULL, A_MFULL, B_NFULL } from './sample-leads.mjs';
 
@@ -48,8 +48,48 @@ ok('same post_id', a1.post_id === '1000000000000001' && a2.post_id === '10000000
 ok('same normalized phone', a1.norm_phone === '+441234567890' && a2.norm_phone === '+441234567890');
 ok('same business fingerprint identity', businessKey(a1.business_name) === businessKey(a2.business_name));
 ok('per-source id differs (source prefix)', a1.source_record_id !== a2.source_record_id);
+ok('NFULL uses a row identity, not a phone/URL identity', a1.dedup_key.startsWith('nfull-row:'));
+ok('MFULL uses its normalized phone identity', a2.dedup_key === 'mfull-phone:+441234567890');
+ok('cross-source matching is not implemented as a global dedup key', a1.dedup_key !== a2.dedup_key);
 ok('MFULL has post_timestamp, NFULL does not', a2.post_timestamp !== null && a1.post_timestamp === null);
 ok('raw_payload retained', a1.raw_payload === A_NFULL);
+ok('extra direct-Sheet columns do not create a second source occurrence',
+  toCanonical('NFULL', { ...A_NFULL, 'Internal extra column': 'ignored' }).source_record_id === a1.source_record_id);
+
+const repeatedNfull = tagSourceOccurrences('NFULL', [A_NFULL, A_NFULL])
+  .map((row) => toCanonical('NFULL', row));
+const shiftedRepeatedNfull = tagSourceOccurrences('NFULL', [B_NFULL, A_NFULL, A_NFULL])
+  .slice(1)
+  .map((row) => toCanonical('NFULL', row));
+ok('otherwise-identical NFULL source rows remain separate occurrences',
+  repeatedNfull[0].source_record_id !== repeatedNfull[1].source_record_id);
+ok('NFULL occurrence identities survive unrelated row insertions',
+  repeatedNfull[0].source_record_id === shiftedRepeatedNfull[0].source_record_id &&
+  repeatedNfull[1].source_record_id === shiftedRepeatedNfull[1].source_record_id);
+
+const samePhoneDifferentNfullRow = toCanonical('NFULL', {
+  ...A_NFULL,
+  Timestamp: '2026-07-13 09:05:00',
+  'Company Name': 'A separate NFULL row',
+  'Lead Proof URL': 'https://www.facebook.com/another/posts/9999999999999999'
+});
+ok('distinct NFULL rows sharing a phone remain distinct',
+  samePhoneDifferentNfullRow.dedup_key !== a1.dedup_key);
+
+const samePhoneDifferentMfullRow = toCanonical('MFULL', {
+  ...A_MFULL,
+  'Company Name': 'MFULL duplicate formatting variant',
+  'Lead Proof URL': 'https://www.facebook.com/different/posts/8888888888888888'
+});
+ok('MFULL rows sharing a normalized phone keep one identity',
+  samePhoneDifferentMfullRow.dedup_key === a2.dedup_key);
+
+const sameUrlDifferentMfullPhone = toCanonical('MFULL', {
+  ...A_MFULL,
+  'Phone Number': '0161 496 0000'
+});
+ok('matching URLs do not merge when phone numbers differ',
+  sameUrlDifferentMfullPhone.dedup_key !== a2.dedup_key);
 
 const b = toCanonical('NFULL', B_NFULL);
 ok('distinct lead has distinct permalink', b.norm_permalink !== a1.norm_permalink);
