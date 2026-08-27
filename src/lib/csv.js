@@ -1,3 +1,5 @@
+import { EXPECTED_HEADERS } from './canonical.js';
+
 // Minimal RFC-4180-ish CSV parsing (handles quoted fields, embedded commas and
 // newlines). Shared by the reconciliation cron and the shadow-compare script.
 
@@ -37,4 +39,25 @@ export function csvToObjects(text) {
   return rows.slice(start + 1)
     .filter((r) => r.some((v) => v && v.trim() !== ''))
     .map((r) => Object.fromEntries(headers.map((h, i) => [h, r[i] ?? ''])));
+}
+
+// Serializer for the display rows served by the public leads endpoint: the 9
+// display columns plus the `source` badge.
+export function toCsv(leads, headers = [...EXPECTED_HEADERS, 'source']) {
+  const esc = (v) => {
+    // Collapse embedded newlines so every record is ONE physical line — the
+    // frontends' line-based CSV parser breaks on multi-line quoted fields.
+    let s = v === null || v === undefined ? '' : String(v);
+    s = s.replace(/[\r\n]+/g, ' ').trim();
+    return /[",]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  // The header row goes through esc() too: EXPECTED_HEADERS[7] contains a comma
+  // ("Post Code (Please Put The Full Postcode, Example: CH41 5LH)"), so joining
+  // it raw split it into two fields and shifted every later column one to the
+  // left — the `source` badge landed under "Lead Proof URL".
+  const lines = [headers.map(esc).join(',')];
+  for (const lead of leads) {
+    lines.push(headers.map((h) => esc(lead[h])).join(','));
+  }
+  return lines.join('\n');
 }

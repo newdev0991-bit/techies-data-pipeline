@@ -22,7 +22,8 @@ function toCsv(objs, headers) {
     const s = v == null ? '' : String(v);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  return [headers.join(','), ...objs.map((o) => headers.map((h) => esc(o[h])).join(','))].join('\n');
+  // esc() the header row too — the Post Code header contains a comma.
+  return [headers.map(esc).join(','), ...objs.map((o) => headers.map((h) => esc(o[h])).join(','))].join('\n');
 }
 
 // Synthetic CSVs. NFULL emits its 9 columns; MFULL includes lead A too (same
