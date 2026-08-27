@@ -7,6 +7,7 @@ import { normalizeUkPhone } from '../src/lib/phone.js';
 import { businessKey, fingerprint } from '../src/lib/fingerprint.js';
 import { toCanonical, toLeadRow } from '../src/lib/canonical.js';
 import { valuesToRows } from '../src/lib/sheets.js';
+import { toCsv, csvToObjects, parseCsv } from '../src/lib/csv.js';
 import { matchKey } from '../src/lib/matchKey.js';
 import { mergeAsymmetric } from '../src/lib/mergeAsymmetric.js';
 import { A_NFULL, A_MFULL, B_NFULL, C_MFULL, D_NFULL, D_MFULL } from './sample-leads.mjs';
@@ -144,5 +145,33 @@ ok('merge: MFULL-only internal duplicate collapsed by phone',
 // A keyless MFULL row can't "exist in NFULL" → always kept.
 const m4 = mergeAsymmetric([cA_N], [toCanonical('MFULL', { 'Company Name': 'Ghost Ltd' })]);
 ok('merge: keyless MFULL row always kept', m4.counts.mfull_only === 1);
+
+// The served CSV must survive a round-trip. EXPECTED_HEADERS[7] contains a comma
+// ("...Full Postcode, Example: CH41 5LH"), so an unescaped header row splits into
+// an extra field and every column after Post Code reads one cell to the left —
+// which put the `source` badge (NFULL/MFULL) under "Lead Proof URL".
+console.log('csv.toCsv: header row is escaped so columns stay aligned');
+const csvLead = {
+  'Lead Statement': 'Opening soon', 'Timestamp': '2026-04-26 01:08',
+  'Company Name': 'Smash & Flame', 'Phone Number': '07455 051000',
+  'Address 1 (Road/Street/Lane/Park/Industrial Estate)': 'unit 10',
+  'Address 2 (Village/Town/City)': 'Alloa', 'Phone 2': '',
+  'Post Code (Please Put The Full Postcode, Example: CH41 5LH)': 'FK10 1RX',
+  'Lead Proof URL': 'https://www.facebook.com/x/posts/1000000000000001',
+  source: 'NFULL'
+};
+const csvText = toCsv([csvLead]);
+const csvBack = csvToObjects(csvText)[0];
+const csvRows = parseCsv(csvText);
+ok('header and data field counts match', csvRows[0].length === csvRows[1].length);
+ok('Post Code header is one field, not split at its comma',
+  csvRows[0][7] === 'Post Code (Please Put The Full Postcode, Example: CH41 5LH)');
+ok('Lead Proof URL holds the URL, not the source badge',
+  csvBack['Lead Proof URL'] === csvLead['Lead Proof URL']);
+ok('source badge round-trips under `source`', csvBack.source === 'NFULL');
+ok('Post Code survives the comma in its own header name',
+  csvBack['Post Code (Please Put The Full Postcode, Example: CH41 5LH)'] === 'FK10 1RX');
+ok('every display column round-trips',
+  Object.keys(csvLead).every((k) => csvBack[k] === csvLead[k]));
 
 console.log(`\nPhase 1 contract: ${passed} checks passed ✅`);

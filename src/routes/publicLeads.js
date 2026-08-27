@@ -6,6 +6,7 @@ import express from 'express';
 import { requireApiKey } from '../lib/auth.js';
 import { pool } from '../db/pool.js';
 import { EXPECTED_HEADERS, toLeadRow } from '../lib/canonical.js';
+import { toCsv } from '../lib/csv.js';
 
 export const publicRouter = express.Router();
 
@@ -244,19 +245,3 @@ publicRouter.post('/exports', async (req, res) => {
   }
 });
 
-// Minimal CSV serializer for the display rows (mirrors the old CSV shape).
-function toCsv(leads) {
-  const headers = [...EXPECTED_HEADERS, 'source'];
-  const esc = (v) => {
-    // Collapse embedded newlines so every record is ONE physical line — the
-    // frontends' line-based CSV parser breaks on multi-line quoted fields.
-    let s = v === null || v === undefined ? '' : String(v);
-    s = s.replace(/[\r\n]+/g, ' ').trim();
-    return /[",]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  const lines = [headers.join(',')];
-  for (const lead of leads) {
-    lines.push(headers.map((h) => esc(lead[h])).join(','));
-  }
-  return lines.join('\n');
-}
